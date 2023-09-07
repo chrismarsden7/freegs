@@ -434,7 +434,7 @@ class ConstrainPaxisIp(Profile):
     def fvac(self):
         return self._fvac
 
-class BetaPIpConstrainedSplineProfiles(Profile):
+class BetapIpConstrainedSplineProfiles(Profile):
     """
     BetaP and Ip-constrained custom (splined) internal plasma profiles.
 
