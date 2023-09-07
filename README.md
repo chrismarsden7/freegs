@@ -109,7 +109,7 @@ The "freegs" module consists of the following files:
 License
 -------
 
-    Copyright 2016-2022 Ben Dudson, University of York, and other contributors.
+    Copyright 2016-2023 Ben Dudson, University of York, and other contributors.
     Email: benjamin.dudson@york.ac.uk
 
     This program is free software: you can redistribute it and/or modify
@@ -134,6 +134,9 @@ References
 
 Versions
 --------
+
+0.9.0  7th September 2023
+  - Addition of splined custom profile for pprime and ffprime
 
 0.7.0  16th August 2022
   - Fixes and additional features for equilibrium measurements
