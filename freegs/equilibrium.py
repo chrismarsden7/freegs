@@ -916,14 +916,14 @@ class Equilibrium:
         Rlcfs = np.array([i[0] for i in separatrix])
         Zlcfs = np.array([i[1] for i in separatrix])
 
-        ind_P2 = np.argmax(Zlcfs)
+        ind_P4 = np.argmin(Zlcfs)
 
-        R_P2 = Rlcfs[ind_P2]
+        R_P4 = Rlcfs[ind_P4]
 
         R0 = self.Rgeometric(npoints=npoints)
         a = self.minorRadius(npoints=npoints)
 
-        return (R0 - R_P2) / a
+        return (R0 - R_P4) / a
 
     def triangularity(self, npoints=360):
         """Calculates plasma triangularity, delta.

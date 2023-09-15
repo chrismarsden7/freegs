@@ -9,7 +9,7 @@ from numpy.linalg import inv, norm
 import numpy as np
 from scipy import optimize
 from . import critical
-
+import matplotlib.pyplot as plt
 
 class constrain(object):
     """
@@ -516,3 +516,284 @@ class ConstrainPsiNorm2DAdvanced(object):
         sum_square_diff = np.sum(diff * diff)
 
         return sum_square_diff
+
+def fshape90(rshape=None,iway=2,ntet=256):
+    '''
+    Original fshape90 MATLAB by:
+    V.V.Drozdov, A.A.Martynov, S.Yu.Medvedev
+    Keldysh Institute of Applied Mathematics 2014
+
+    fshape90 is a faithful Python translation of the original fshape90 MATLAB script.
+    Translation by C.Marsden.
+    
+    rshape[0] -> rbc -> R0
+    rshape[1] -> rl -> a
+    rshape[2] -> dtre -> triangularity upper = tre + dtre
+    rshape[3] -> tre -> triangularity lower = tre - dtre
+    rshape[4] -> 0
+    rshape[5] -> zbc -> Z0
+    rshape[6] -> phase -> Rotates (R,Z) by phase
+    rshape[7] -> vit -> elongation upper = vit + dvit
+    rshape[8] -> dvit -> elongation lower = vit - divt
+    rshape[9] -> 0
+    rshape[10] -> fsepu -> 0 - smooth upper, >0 - 90 degree X-point
+    rshape[11] -> fsepd -> 0 - smooth lower, >0 - 90 degree X-point
+
+    iway -> default 2 paramterisation
+    ntet -> Number of boundary points
+
+    Fourier-like boundary paramterisation in the form:
+    uksr = rshape[1]*(sepfac * cost - (rshape[3]+rshape[2]*sint)*sint^2)
+    vksr = rshape[1]*sint*(rshape[7]+rshape[8]*sint)
+
+    Returns r, z of the boundary points
+
+    '''
+    if rshape is None:
+
+        rshape = [1.000, 0.750, -0.10, 0.40, 0.0, 0.000, 0.0, 2.00, -0.10, 0.0, 1.85, 1.45]
+
+    tet = np.linspace(0.0,2*np.pi,ntet+1,endpoint=True)
+    sint = np.sin(tet)
+    cost = np.cos(tet)
+
+    # For providing right angle
+    d_up = (rshape[3]+1.5*rshape[2])**2. + (0.5*rshape[7]+rshape[8])**2.
+    d_dn = (rshape[3]-1.5*rshape[2])**2. + (0.5*rshape[7]-rshape[8])**2.
+
+    if iway==1:
+
+        # Method 1
+
+        fac1 = np.full(ntet+1,1.0)
+        fac2 = np.full(ntet+1,1.0)
+
+        if (rshape[10]>1 and rshape[11]>1):
+
+            # Providing right angle for double null if possible
+
+            a = 0.25 / d_up
+            b = 0.25 / d_dn
+
+            D = 1. - 2.*(a+b) + (a-b)**2.
+
+            if D > 0:
+
+                fsepu_inv = b - a + np.sqrt(D)
+                fsepd_inv = a - b + np.sqrt(D)
+
+                if (0<fsepu_inv<1 and 0<fsepd_inv<1):
+
+                    rshape[10] = 1./fsepu_inv
+                    rshape[11] = 1./fsepd_inv
+
+                else:
+                    print('')
+                    # No right angle
+
+            else:
+                print('') 
+                # No right angle
+
+            fac1 = np.sqrt(rshape[10]*(1.-sint) / (rshape[10]-sint))
+            fac2 = np.sqrt(rshape[11]*(1.+sint) / (rshape[11]+sint))
+
+        elif(rshape[11]>1):
+
+            # Providing right angle for single null
+
+            if d_dn>0.5:
+
+                rshape[11] = d_dn/(d_dn-0.5)
+
+            else:
+
+                rshape[11] = 1000.
+
+            fac2 = np.sqrt(rshape[11]*(1.+sint) / (rshape[11]+sint))
+
+        sepfac = fac1*fac2
+
+    else:
+
+        # Method 2
+
+        fac1 = np.full(ntet+1,1.0)
+
+        if (rshape[10]>0):
+
+            # Providing right angle
+
+            rshape[10] = np.sqrt(d_up)
+            fac1 = rshape[10]*abs(cost) - (rshape[10]-1.)*cost*cost
+
+        fac2 = np.full(ntet+1,1.0)
+
+        if (rshape[11]>0):
+
+            # Providing right angle
+
+            rshape[11] = np.sqrt(d_dn)
+            fac2 = rshape[11]*abs(cost) - (rshape[11]-1.)*cost*cost
+
+        sepfac = fac2
+        isge0 = [i for i,val in enumerate(sint) if val >= 0]
+        for i in isge0:
+            sepfac[i] = fac1[i]
+
+    uksr = rshape[1]*(sepfac*cost-(rshape[3]+rshape[2]*sint)*sint*sint)
+    vksr = rshape[1]*sint*(rshape[7]+rshape[8]*sint)
+
+    cosrot = np.cos(np.pi*rshape[6])
+    sinrot = np.sin(np.pi*rshape[6])
+
+    r = rshape[0] + uksr*cosrot - vksr*sinrot
+    z = rshape[5] + uksr*sinrot + vksr*cosrot
+
+    return r,z
+
+def make_lcfs(R0=4.21,
+            A=1.80,
+            Z0=0.0,
+            delta_u=0.56,
+            delta_l=0.56,
+            kappa_u=3.00,
+            kappa_l=3.00,
+            fsep_u=1.45,
+            fsep_l=1.45,
+            phase=0.0,
+            Npoints=256,
+            method=2,
+            show=False
+):
+
+    '''
+    Wrapper function for fshape90. Designed to accept
+    the more commonly used plasma shape paramters.
+
+    R0 -> Major radius [m]
+    A -> Aspect ratio [-]
+    Z0 -> Midplane height [m]
+    delta_u -> Upper triangularity [-]
+    delta_l -> Lower triangularity [-]
+    kappa_u -> Upper elongation [-]
+    kappa_l -> Lower elongation [-]
+    fsep_u -> Upper smoothing factor. 0 if no X-point, >0 if X-point [-]
+    fsep_l -> Lower smoothing factor. 0 if no X-point, >0 if X-point [-]
+    phase -> Phase to rotate boundary points by, fraction of 180 deg.
+    Npoints -> Number of boundary points [-]
+    method -> 1, 2 , method to be used. Default is 2 [-]
+    show -> Plot LCFS [bool]
+
+    Returns r, z of the boundary points
+    '''
+
+    # Define minor radius
+    a = R0 / A
+    
+    # Define intermediate variables used as inputs to fshape90
+    tre = 0.5*(delta_u + delta_l)
+    dtre = 0.5*(delta_u - delta_l)
+    vit = 0.5*(kappa_u + kappa_l)
+    dvit = 0.5*(kappa_u - kappa_l)
+
+    # Define inputs to fshape90
+    rshape = [R0,a,dtre,tre,0,Z0,phase,vit,dvit,0,fsep_u,fsep_l]
+
+    # Generate LCFS with fshape90
+    r,z = fshape90(rshape=rshape,iway=method,ntet=Npoints)
+
+    if show:
+
+        # Plot the LCFS generated by fshape90
+        title_str = r'$R_{0}$: '+str(R0)+'m. '
+        title_str += r'A: '+str(A)+'. '
+        title_str += r'$Z_{0}$: '+str(Z0)+'m. '
+        title_str += r'$\delta_{u}$: '+str(delta_u)+'. '
+        title_str += r'$\delta_{l}$: '+str(delta_l)+'. '
+        title_str += '\n'
+        title_str += r'$\kappa_{u}$: '+str(kappa_u)+'. '
+        title_str += r'$\kappa_{l}$: '+str(kappa_l)+'. '
+        title_str += r'Phase: '+str(phase*180.0)+'deg. '
+        title_str += r'$f_{sep,u}$: '+str(fsep_u)+'. '
+        title_str += r'$f_{sep,l}$: '+str(fsep_l)+'. '
+
+        fig, ax = plt.subplots()
+        ax.plot(r,z,'b')
+        ax.plot(r,z,'bx')
+        ax.set_xlabel('R (m)')
+        ax.set_ylabel('Z (m)')
+        ax.set_aspect('equal')
+        ax.set_title(title_str)
+        plt.show()
+
+    return r,z
+
+def generate_separatrix_points(R0=4.21,
+            A=1.80,
+            Z0=0.0,
+            delta_u=0.56,
+            delta_l=0.56,
+            kappa_u=3.00,
+            kappa_l=3.00,
+            fsep_u=1.45,
+            fsep_l=1.45,
+            phase=0.0,
+            Npoints=256
+):
+    '''
+    Inputs:
+    Takes as input plasma shaping parameters that described the shape of the separatrix.
+
+    Outputs:
+    Returns a dictionary containing:
+    - Rlcfs -> List of R coordinates of points on the LCFS
+    - Zlcfs -> List of Z coordinates of points on the LCFS
+    - IMP -> (R,Z) tuple of the HFS midplane
+    - OMP -> (R,Z) tuple of the LFS midplane
+    - UPPER -> (R,Z) tuple of the point on the LCFS of the most positive Z
+    - LOWER -> (R,Z) tuple of the point on the LCFS of the most negative Z
+    '''
+
+    # Generate r,z points of the LCFS
+    r,z = make_lcfs(R0,
+            A,
+            Z0,
+            delta_u,
+            delta_l,
+            kappa_u,
+            kappa_l,
+            fsep_u,
+            fsep_l,
+            phase,
+            Npoints,
+            method=2,
+            show=False)
+    
+    # Extract the IMP, OMP, UPPER and LOWER points
+    arg_IMP = np.argmin(r)
+    arg_OMP = np.argmax(r)
+    arg_UPPER = np.argmax(z)
+    arg_LOWER = np.argmin(z)
+
+    R_IMP = r[arg_IMP]
+    Z_IMP = z[arg_IMP]
+
+    R_OMP = r[arg_OMP]
+    Z_OMP = z[arg_OMP]
+
+    R_UPPER = r[arg_UPPER]
+    Z_UPPER = z[arg_UPPER]
+
+    R_LOWER = r[arg_LOWER]
+    Z_LOWER = z[arg_LOWER]
+
+    LCFS = {'Rlcfs':r,
+            'Zlcfs':z,
+            'IMP':(R_IMP,Z_IMP),
+            'OMP':(R_OMP,Z_OMP),
+            'UPPER':(R_UPPER,Z_UPPER),
+            'LOWER':(R_LOWER,Z_LOWER)
+            }
+    
+    return LCFS
