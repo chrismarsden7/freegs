@@ -195,7 +195,6 @@ def solve(
         if show:
             print("psi_relchange: " + str(psi_relchange))
             print("bndry_relchange: " + str(bndry_relchange))
-            print("bndry_change: " + str(bndry_change))
             print("")
 
         # Check if the changes in psi are small enough and that it is ok to start checking for convergence

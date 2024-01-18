@@ -23,6 +23,7 @@ from . import machine
 
 import matplotlib.pyplot as plt
 
+from shapely import intersection, LineString
 
 class Equilibrium:
     """
@@ -209,11 +210,8 @@ class Equilibrium:
     def plasmaVolume(self):
         """Calculate the volume of the plasma in m^3"""
 
-        dR = self.R[1, 0] - self.R[0, 0]
-        dZ = self.Z[0, 1] - self.Z[0, 0]
-
         # Volume element
-        dV = 2.0 * pi * self.R * dR * dZ
+        dV = 2.0 * pi * self.R * self.dR * self.dZ
 
         if self.mask is not None:  # Only include points in the core
             dV *= self.mask
@@ -298,6 +296,13 @@ class Equilibrium:
         """
         # return self.plasma_psi + self.tokamak.psi(self.R, self.Z)
         return (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+
+    def psi_psiN(self,psiN):
+        """
+        Poloidal flux for a given value of normalised poloidal flux.
+        """
+
+        return psiN * (self.psi_bndry - self.psi_axis) + self.psi_axis
 
     def psiRZ(self, R, Z):
         """
@@ -418,6 +423,21 @@ class Equilibrium:
             :, 0:2
         ]
 
+    def psi_surfRZ(self, psiN=0.995, npoints=360):
+        """
+        Returns the R,Z of a flux surface specified by a value of psiN.
+        """
+
+        surf = critical.find_separatrix(self, opoint=None, xpoint=None, ntheta=200, psi=None, axis=None, psival=psiN)
+
+        Rsurf = [point[0] for point in surf]
+        Zsurf = [point[1] for point in surf]
+
+        Rsurf.append(Rsurf[0])
+        Zsurf.append(Zsurf[0])
+
+        return np.array(Rsurf), np.array(Zsurf)
+
     def solve(self, profiles, Jtor=None, psi=None, psi_bndry=None):
         """
         Calculate the plasma equilibrium given new profiles
@@ -470,9 +490,7 @@ class Equilibrium:
         self._updatePlasmaPsi(plasma_psi)
 
         # Update plasma current
-        dR = self.R[1, 0] - self.R[0, 0]
-        dZ = self.Z[0, 1] - self.Z[0, 0]
-        self._current = romb(romb(Jtor)) * dR * dZ
+        self._current = romb(romb(Jtor)) * self.dR * self.dZ
         self.Jtor = Jtor
 
     def _updateBoundaryPsi(self, psi=None):
@@ -937,6 +955,164 @@ class Equilibrium:
 
         return 0.5 * (tri_u + tri_l)
 
+    def squarenessUpper(self, npoints=360):
+        """Calculates the upper plasma squareness, zeta.
+        """
+
+        # Get the LCFS
+        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
+        Rlcfs = np.array([i[0] for i in separatrix])
+        Zlcfs = np.array([i[1] for i in separatrix])
+
+        Rlcfs = [i[0] for i in separatrix]
+        Zlcfs = [i[1] for i in separatrix]
+        Rlcfs.append(Rlcfs[0])
+        Zlcfs.append(Zlcfs[1])
+
+        # Get the position of the maximum Z of the LCFS, P2.
+        ind_P2 = np.argmax(Zlcfs)
+        R_P2 = Rlcfs[ind_P2]
+        Z_P2 = Zlcfs[ind_P2]
+
+        # Get the position of the maximum R of the LCFS, P1.
+        ind_P1 = np.argmax(Rlcfs)
+        R_P1 = Rlcfs[ind_P1]
+        Z_P1 = Zlcfs[ind_P1]
+
+        # Get a = Z difference between P1 and P2
+        a = Z_P2 - Z_P1
+
+        # Get b = R difference between P1 and P2
+        b = R_P1 - R_P2
+
+        # Get the elipse intersection point, P5
+        R_P5 = R_P2 + b*np.sqrt(0.5)
+        Z_P5 = Z_P1 + a*np.sqrt(0.5)
+
+        # Define P6, a point at the R of P1 and the Z of P2
+        R_P6 = R_P1
+        Z_P6 = Z_P2
+
+        # Define P7, a point at the R of P2 and the Z of P1
+        R_P7 = R_P2
+        Z_P7 = Z_P1
+
+        # Get P8, the intersection point of the LCFS and a line joining P6 to P7
+        line = LineString(zip([R_P6,R_P7],[Z_P6,Z_P7]))
+        lcfs = LineString(zip(Rlcfs,Zlcfs))
+        intersection_point = intersection(lcfs,line)
+        
+        R_P8 = intersection_point.x
+        Z_P8 = intersection_point.y
+
+        # Calculate distance between P7 and P8
+        dist_P78 = np.sqrt((R_P7-R_P8)**2. + (Z_P7-Z_P8)**2.)
+
+        # Calculate distance between P7 and P5
+        dist_P75 = np.sqrt((R_P7-R_P5)**2. + (Z_P7-Z_P5)**2.)
+
+        # Calculate distance between P5 and P6
+        dist_P56 = np.sqrt((R_P5-R_P6)**2. + (Z_P5-Z_P6)**2.)
+
+        return (dist_P78 - dist_P75) / dist_P56
+
+    def squarenessLower(self, npoints=360):
+        """Calculates the lower plasma squareness, zeta.
+        """
+
+        # Get the LCFS
+        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
+        Rlcfs = np.array([i[0] for i in separatrix])
+        Zlcfs = np.array([i[1] for i in separatrix])
+
+        Rlcfs = [i[0] for i in separatrix]
+        Zlcfs = [i[1] for i in separatrix]
+        Rlcfs.append(Rlcfs[0])
+        Zlcfs.append(Zlcfs[1])
+
+        # Get the position of the minimum Z of the LCFS, P3.
+        ind_P3 = np.argmin(Zlcfs)
+        R_P3 = Rlcfs[ind_P3]
+        Z_P3 = Zlcfs[ind_P3]
+
+        # Get the position of the maximum R of the LCFS, P1.
+        ind_P1 = np.argmax(Rlcfs)
+        R_P1 = Rlcfs[ind_P1]
+        Z_P1 = Zlcfs[ind_P1]
+
+        # Get a = Z difference between P1 and P3
+        a = Z_P3 - Z_P1
+
+        # Get b = R difference between P1 and P3
+        b = R_P1 - R_P3
+
+        # Get the elipse intersection point, P5
+        R_P5 = R_P3 + b*np.sqrt(0.5)
+        Z_P5 = Z_P1 + a*np.sqrt(0.5)
+
+        # Define P6, a point at the R of P1 and the Z of P3
+        R_P6 = R_P1
+        Z_P6 = Z_P3
+
+        # Define P7, a point at the R of P3 and the Z of P1
+        R_P7 = R_P3
+        Z_P7 = Z_P1
+
+        # Get P8, the intersection point of the LCFS and a line joining P6 to P7
+        line = LineString(zip([R_P6,R_P7],[Z_P6,Z_P7]))
+        lcfs = LineString(zip(Rlcfs,Zlcfs))
+        intersection_point = intersection(lcfs,line)
+
+        R_P8 = intersection_point.x
+        Z_P8 = intersection_point.y
+
+        # Calculate distance between P7 and P8
+        dist_P78 = np.sqrt((R_P7-R_P8)**2. + (Z_P7-Z_P8)**2.)
+
+        # Calculate distance between P7 and P5
+        dist_P75 = np.sqrt((R_P7-R_P5)**2. + (Z_P7-Z_P5)**2.)
+
+        # Calculate distance between P5 and P6
+        dist_P56 = np.sqrt((R_P5-R_P6)**2. + (Z_P5-Z_P6)**2.)
+
+        return (dist_P78 - dist_P75) / dist_P56
+
+    def squareness(self, npoints=360):
+        """Calculates plasma squareness, zeta.
+
+        Here zeta is defined as the average of the upper
+        and lower squarenesses.
+        """
+
+        sq_u = self.squarenessUpper(npoints=npoints)
+        sq_l = self.squarenessLower(npoints=npoints)
+
+        return 0.5 * (sq_u + sq_l)
+
+    def flux_surface_averaged_Bpol2(self, psiN=0.995, npoints=360):
+        """
+        Calculates the flux surface averaged value of the square of the poloidal field.
+        """
+
+        # Get R, Z points of the flux surface
+        Rsurf, Zsurf = self.psi_surfRZ(psiN=psiN,npoints=npoints)
+
+        # Get the poloidal field
+        Bpol_surf = self.Bpol(Rsurf,Zsurf)
+
+        # Get the square of the poloidal field
+        Bpol_surf2 = self.Bpol(Rsurf,Zsurf)**2.0
+
+        # Get dl along the surface
+        dl = np.sqrt(np.diff(Rsurf)**2.0 + np.diff(Zsurf)**2.0)
+        dl = np.insert(dl,0,0.0)
+
+        # Get l along the surface
+        l = np.cumsum(dl)
+
+        # Calculate the flux surface averaged quantity
+        return np.trapz(l,Bpol_surf2 * Bpol_surf) / np.trapz(l, np.ones(np.size(l)) * Bpol_surf)
+
     def shafranovShift(self, npoints=360):
         """Calculates the plasma shafranov shift
         [delta_shafR,delta_shafZ] where
@@ -961,63 +1137,47 @@ class Equilibrium:
         # Produce array of Bpol^2 in (R,Z)
         B_polvals_2 = self.Bz(R, Z) ** 2 + self.Br(R, Z) ** 2
 
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        volume_averaged_Bp2 = self.calc_volume_averaged(B_polvals_2)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
-
+        vol = self.plasmaVolume()
         Ip = self.plasmaCurrent()
-        R_geo = self.Rgeometric(npoints=npoints)
-        elon = self.elongation(npoints=npoints)
-        effective_elon = self.effectiveElongation(npoints=npoints)
+        R_geo = self.Rgeometric()
+        kappa = self.elongation()
+        kappa_a = self.effectiveElongation()
 
-        integral = romb(romb(B_polvals_2 * dV))
-        return ((2 * integral) / ((mu0 * Ip) ** 2 * R_geo)) * (
-            (1 + elon * elon) / (2.0 * effective_elon)
-        )
+        return ((1.+kappa*kappa)/(2.*kappa_a)) * (2.0*vol*volume_averaged_Bp2) / ((mu0*Ip)**2.0 * R_geo)
 
     def internalInductance2(self):
         """Calculates li2 plasma internal inductance"""
 
         R = self.R
         Z = self.Z
-        # Produce array of Bpol in (R,Z)
-        B_polvals_2 = self.Br(R, Z) ** 2 + self.Bz(R, Z) ** 2
+        # Produce array of Bpol^2 in (R,Z)
+        B_polvals_2 = self.Bz(R, Z) ** 2 + self.Br(R, Z) ** 2
 
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
-
+        volume_averaged_Bp2 = self.calc_volume_averaged(B_polvals_2)
+        
+        vol = self.plasmaVolume()
         Ip = self.plasmaCurrent()
         R_mag = self.Rmagnetic()
 
-        integral = romb(romb(B_polvals_2 * dV))
-        return 2 * integral / ((mu0 * Ip) ** 2 * R_mag)
+        return (2.0*vol*volume_averaged_Bp2) / ((mu0*Ip)**2.0 * R_mag)
 
     def internalInductance3(self, npoints=360):
         """Calculates li3 plasma internal inductance"""
 
         R = self.R
         Z = self.Z
-        # Produce array of Bpol in (R,Z)
-        B_polvals_2 = self.Br(R, Z) ** 2 + self.Bz(R, Z) ** 2
+        # Produce array of Bpol^2 in (R,Z)
+        B_polvals_2 = self.Bz(R, Z) ** 2 + self.Br(R, Z) ** 2
 
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        volume_averaged_Bp2 = self.calc_volume_averaged(B_polvals_2)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
-
+        vol = self.plasmaVolume()
         Ip = self.plasmaCurrent()
-        R_geo = self.Rgeometric(npoints=npoints)
+        R_geo = self.Rgeometric()
 
-        integral = romb(romb(B_polvals_2 * dV))
-        return 2 * integral / ((mu0 * Ip) ** 2 * R_geo)
+        return (2.0*vol*volume_averaged_Bp2) / ((mu0*Ip)**2.0 * R_geo)
 
     def internalInductance(self, npoints=360):
         """Calculates plasma internal inductance li
@@ -1031,9 +1191,7 @@ class Equilibrium:
         # Produce array of Bpol in (R,Z)
         B_polvals_2 = self.Br(R, Z) ** 2 + self.Bz(R, Z) ** 2
 
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        dV = 2.0 * np.pi * R * self.dR * self.dZ
 
         if self.mask is not None:  # Only include points in the core
             dV *= self.mask
@@ -1045,67 +1203,38 @@ class Equilibrium:
         return 2 * integral / (mu0 * mu0 * R_geo * Ip * Ip)
 
     def poloidalBeta(self):
-        """Calculate plasma poloidal beta by integrating the thermal pressure
-        and poloidal magnetic field pressure over the plasma volume."""
-
-        R = self.R
-        Z = self.Z
-
-        # Produce array of Bpol in (R,Z)
-        B_polvals_2 = self.Br(R, Z) ** 2 + self.Bz(R, Z) ** 2
-
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        """Return the poloidal beta"""
 
         # Normalised psi
-        psi_norm = self.psiN()
+        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
+        volume_averaged_pressure = self.calc_volume_averaged(pressure)
+        volume_averaged_magnetic_pressure = self.calc_volume_averaged(self.Bpol(self.R,self.Z)**2.0) / (2.0 * mu0)
 
-        pressure_integral = romb(romb(pressure * dV))
-        field_integral_pol = romb(romb(B_polvals_2 * dV))
-        return 2 * mu0 * pressure_integral / field_integral_pol
+        return volume_averaged_pressure / volume_averaged_magnetic_pressure
 
     def poloidalBeta2(self):
         """Return the poloidal beta
-        betap = (8pi/mu0) * int(p)dRdZ / Ip^2
+        betap2 = (4 * vol * volume_averaged(p)) / (mu0 * Ip^2 * Raxis)
         """
 
-        dR = self.R[1, 0] - self.R[0, 0]
-        dZ = self.Z[0, 1] - self.Z[0, 0]
-
         # Normalised psi
         psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
-        if self.mask is not None:
-            # If there is a masking function (X-points, limiters)
-            pressure *= self.mask
 
-        # Integrate pressure in 2D
-        return (
-            ((8.0 * pi) / mu0)
-            * romb(romb(pressure))
-            * dR
-            * dZ
-            / (self.plasmaCurrent() ** 2)
-        )
+        volume_averaged_pressure = self.calc_volume_averaged(pressure)
+
+        return (4 * self.plasmaVolume() * volume_averaged_pressure) / (mu0 * self.plasmaCurrent()**2.0 * self.Rmagnetic())
 
     def poloidalBeta3(self):
-        """Calculates alterantive poloidal beta definition."""
-
-        R = self.R
-        Z = self.Z
-
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        """Return the poloidal beta
+        betap3 = (4 * vol * volume_averaged(p)) / (mu0 * Ip^2 * Rgeo)
+        """
 
         # Normalised psi
         psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
@@ -1113,28 +1242,12 @@ class Equilibrium:
         # Plasma pressure
         pressure = self.pressure(psi_norm)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
+        volume_averaged_pressure = self.calc_volume_averaged(pressure)
 
-        pressure_integral = romb(romb(pressure * dV))
-        Ip = self.plasmaCurrent()
-        vol = self.plasmaVolume()
-        r0 = self.Rgeometric()
-        return 4 * vol * pressure_integral / (mu0 * Ip * Ip * r0)
+        return (4 * self.plasmaVolume() * volume_averaged_pressure) / (mu0 * self.plasmaCurrent()**2.0 * self.Rgeometric())
 
     def toroidalBeta(self):
-        """Calculate plasma toroidal beta by integrating the thermal pressure
-        and toroidal magnetic field pressure over the plasma volume."""
-
-        R = self.R
-        Z = self.Z
-
-        # Produce array of Btor in (R,Z)
-        B_torvals_2 = self.Btor(R, Z) ** 2
-
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        """Calculate plasma toroidal beta."""
 
         # Normalised psi
         psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
@@ -1142,44 +1255,33 @@ class Equilibrium:
         # Plasma pressure
         pressure = self.pressure(psi_norm)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
+        volume_averaged_pressure = self.calc_volume_averaged(pressure)
 
-        pressure_integral = romb(romb(pressure * dV))
-
-        # Correct for errors in Btor and core masking
-        np.nan_to_num(B_torvals_2, copy=False)
-
-        field_integral_tor = romb(romb(B_torvals_2 * dV))
-        return 2 * mu0 * pressure_integral / field_integral_tor
+        # Toroidal field at geometric axis
+        geo = self.geometricAxis()
+        Bt = self.Btor(geo[0], geo[1])
+        
+        return 2.0*mu0*volume_averaged_pressure/Bt**2.0
 
     def totalBeta(self):
         """Calculate plasma total beta"""
         return 1.0 / ((1.0 / self.poloidalBeta()) + (1.0 / self.toroidalBeta()))
 
-    def betaN(self, npoints=360):
+    def betaN(self):
         """Calculate normalised plasma beta"""
+
+        # Toroidal field at geometric axis
         geo = self.geometricAxis()
         Bt = self.Btor(geo[0], geo[1])
+
         return (
-            100.0
-            * 1.0e06
-            * self.toroidalBeta()
+              1.0e06
+            * self.totalBeta()
             * ((self.minorRadius() * Bt) / (self.plasmaCurrent()))
         )
 
     def pressure_ave(self):
-        """Calculate average pressure, Pa."""
-
-        R = self.R
-        Z = self.Z
-
-        # Produce array of Btor in (R,Z)
-        B_torvals_2 = self.Btor(R, Z) ** 2
-
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
+        """Calculate volume averaged pressure, Pa."""
 
         # Normalised psi
         psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
@@ -1187,36 +1289,20 @@ class Equilibrium:
         # Plasma pressure
         pressure = self.pressure(psi_norm)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
-
-        pressure_integral = romb(romb(pressure * dV))
-        plasmaVolume = romb(romb(dV))
-
-        return pressure_integral / plasmaVolume
+        return self.calc_volume_averaged(pressure)
 
     def w_th(self):
         """
         Stored thermal energy in plasma, J.
         """
 
-        R = self.R
-        Z = self.Z
-
-        dR = R[1, 0] - R[0, 0]
-        dZ = Z[0, 1] - Z[0, 0]
-        dV = 2.0 * np.pi * R * dR * dZ
-
         # Normalised psi
         psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
-
-        pressure_integral = romb(romb(pressure * dV))
+        pressure_integral = self.calc_volume_integrated(pressure)
         thermal_energy = (3.0 / 2.0) * pressure_integral
 
         return thermal_energy
@@ -1238,6 +1324,26 @@ class Equilibrium:
 
         return val
 
+    def calc_volume_integrated(self,field):
+        """
+        Calculates the volume integral of the input field.
+        """
+
+        dV = 2.0 * np.pi * self.R * self.dR  *self.dZ
+
+        if self.mask is not None:  # Only include points in the core
+            dV *= self.mask
+
+        return romb(romb(field * dV))
+
+    def calc_volume_averaged(self,field):
+        """
+        Calculates the volume average of the input field.
+        """
+
+        volume_integrated_field = self.calc_volume_integrated(field)
+        
+        return volume_integrated_field / self.plasmaVolume()
 
 def refine(eq, nx=None, ny=None):
     """
