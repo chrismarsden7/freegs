@@ -521,7 +521,7 @@ class BetapIpConstrainedSplineProfiles(Profile):
         self.pprime_spline = interp1d(self.psi_n_points,self.pprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
         self.ffprime_spline = interp1d(self.psi_n_points,self.ffprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
 
-        # Create 1D splines for the integral of pprime, ffprime - this will be used in constraining betaP.
+        # Create 1D splines for the integral of pprime, ffprime - these will be used in constraining BetaP and Ip.
         pn_points = np.linspace(0.0,1.0,100,endpoint=True)
 
         def pprime_int_func(pn):
@@ -611,7 +611,7 @@ class BetapIpConstrainedSplineProfiles(Profile):
         # Ip = L * (Beta0 * IR + (1-Beta0)*I_R)
         #    = L*Beta0*(IR - I_R) + L*I_R
         #
-        #L = self.Ip / ( (Beta0*IR) + ((1.0-Beta0)*(I_R)) )
+        # L = self.Ip / ( (Beta0*IR) + ((1.0-Beta0)*(I_R)) )
 
         L = self.Ip/I_R - LBeta0*(IR/I_R - 1)
         Beta0 = LBeta0 / L
@@ -700,7 +700,7 @@ class PaxisIpConstrainedSplineProfiles(Profile):
         self.pprime_spline = interp1d(self.psi_n_points,self.pprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
         self.ffprime_spline = interp1d(self.psi_n_points,self.ffprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
 
-        # Create 1D splines for the integral of pprime, ffprime - this will be used in constraining betaP.
+        # Create 1D splines for the integral of pprime, ffprime - these will be used in constraining Paxis and Ip.
         pn_points = np.linspace(0.0,1.0,100,endpoint=True)
 
         def pprime_int_func(pn):
@@ -776,7 +776,7 @@ class PaxisIpConstrainedSplineProfiles(Profile):
         # Ip = L * (Beta0 * IR + (1-Beta0)*I_R)
         #    = L*Beta0*(IR - I_R) + L*I_R
         #
-        #L = self.Ip / ( (Beta0*IR) + ((1.0-Beta0)*(I_R)) )
+        # L = self.Ip / ( (Beta0*IR) + ((1.0-Beta0)*(I_R)) )
 
         L = self.Ip/I_R - LBeta0*(IR/I_R - 1)
         Beta0 = LBeta0 / L
@@ -812,7 +812,618 @@ class PaxisIpConstrainedSplineProfiles(Profile):
         return self.L * (1 - self.Beta0) * self.Raxis * shape
 
     def fvac(self):
-        return self._fvac 
+        return self._fvac
+
+class PprimeIpConstrainedSplineProfiles(Profile):
+    """
+    Pprime and Ip-constrained custom (splined) internal plasma profiles.
+
+    """
+
+    def __init__(self, eq=None, Ip=None, Raxis=None, psi_n=None, pprime=None, ffprime=None, fvac=None):
+        """
+        eq - Equilibrium object
+        Ip - Plasma current [Amps]
+        Raxis - R used in p' and ff' components
+        psi_n - Normalised (0,1) poloidal flux used to defined the profiles
+        pprime - Pressure gradient - dp/dpsi
+        ffprime - f*dfpol/dpsi
+        fvac - Vacuum f = R*Bt
+
+        """
+
+        # Check inputs
+        if eq is None:
+            raise ValueError("No equilibrium object provided")
+        if Ip is None:
+            raise ValueError("No plasma current value provided")
+        if Raxis is None:
+            raise ValueError("No Raxis value provided")
+        if psi_n is None:
+            raise ValueError("No psi_n data provided")
+        if pprime is None:
+            raise ValueError("No pprime data provided")
+        if ffprime is None:
+            raise ValueError("No ffprime data provided")
+        if fvac is None:
+            raise ValueError("No fvac data provided")
+
+        # Set values for later use
+        self.eq = eq
+        self.Ip = Ip
+        self.Raxis = Raxis
+        self.psi_n_points = psi_n
+        self.pprime_points = pprime
+        self.ffprime_points = ffprime
+        self._fvac = fvac
+
+        # Create 1D splines for the internal profiles - these will be like jtorshape
+        self.pprime_spline = interp1d(self.psi_n_points,self.pprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+        self.ffprime_spline = interp1d(self.psi_n_points,self.ffprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        # Create 1D splines for the integral of pprime, ffprime - these will be used in constraining Paxis and Ip.
+        pn_points = np.linspace(0.0,1.0,100,endpoint=True)
+
+        def pprime_int_func(pn):
+            val, _ = quad(self.pprime_spline,pn,1.0)
+            return val
+
+        pprime_int_vals = []
+        for pn in pn_points:
+            pprime_int_vals.append(pprime_int_func(pn))
+
+        pprime_int_vals = np.asarray(pprime_int_vals)
+
+        self.pprime_int_spline = interp1d(pn_points,pprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        def ffprime_int_func(pn):
+            val, _ = quad(self.ffprime_spline,pn,1.0)
+            return val
+
+        ffprime_int_vals = []
+        for pn in pn_points:
+            ffprime_int_vals.append(ffprime_int_func(pn))
+
+        ffprime_int_vals = np.asarray(ffprime_int_vals)
+
+        self.ffprime_int_spline = interp1d(pn_points,ffprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+    def Jtor(self, R, Z, psi, psi_bndry=None):
+        """Calculate toroidal plasma current
+
+        Jtor = R*pprime + ffprime/(R * mu0)
+        """
+
+        # Intermediary update of the plasma
+        # boundary and axis flux
+        self.eq._updateBoundaryPsi(psi)
+        psi_bndry = self.eq.psi_bndry
+        psi_axis = self.eq.psi_axis
+        mask = self.eq.mask
+
+        dR = R[1, 0] - R[0, 0]
+        dZ = Z[0, 1] - Z[0, 0]
+
+        psi_norm = (psi - psi_axis) / (psi_bndry - psi_axis)
+
+        pprime_shape = self.pprime_spline(psi_norm)
+        ffprime_shape = self.ffprime_spline(psi_norm)
+        
+        if mask is not None:
+            pprime_shape *= mask
+            ffprime_shape *= mask
+
+        # Now apply constraints to define constants
+
+        # Constraining pprime = pprime_spline
+        # pprime(psinorm) = (LBeta0 / Raxis) * pprime_spline(psinorm)
+        # Hence LBeta0 = Raxis
+        LBeta0 = self.Raxis
+        
+        # Integrate current components
+        IR = romb(romb(pprime_shape * R/self.Raxis)) * dR*dZ # pprime component
+        I_R = romb(romb(ffprime_shape * self.Raxis/(R*mu0))) * dR*dZ # ffprime component
+        
+        # Toroidal plasma current Ip is
+        #
+        # Ip = L * (Beta0 * IR + (1-Beta0)*I_R)
+        #    = L*Beta0*(IR - I_R) + L*I_R
+        #
+        # L = self.Ip / ( (Beta0*IR) + ((1.0-Beta0)*(I_R)) )
+
+        L = self.Ip/I_R - LBeta0*(IR/I_R - 1)
+        Beta0 = LBeta0 / L
+
+        print("Constraints: L = %e, Beta0 = %e" % (L, Beta0))
+
+        # Toroidal current
+        Jtor = L *( (pprime_shape * Beta0 * R / self.Raxis) + ((1 - Beta0) * self.Raxis * ffprime_shape/ (R * mu0)) )
+
+        self.L = L
+        self.Beta0 = Beta0
+
+        self.psi_bndry = psi_bndry
+        self.psi_axis = psi_axis
+
+        return Jtor
+
+    # Profile functions
+    def pprime(self, pn):
+        """
+        dp/dpsi as a function of normalised psi. 0 outside core.
+        Calculate pprimeshape inside the core only
+        """
+        shape = self.pprime_spline(pn)
+        return self.L * self.Beta0 / self.Raxis * shape
+
+    def ffprime(self, pn):
+        """
+        f * df/dpsi as a function of normalised psi. 0 outside core.
+        Calculate ffprimeshape inside the core only.
+        """
+        shape = self.ffprime_spline(pn)
+        return self.L * (1 - self.Beta0) * self.Raxis * shape
+
+    def fvac(self):
+        return self._fvac
+
+class BetapFfprimeConstrainedSplineProfiles(Profile):
+    """
+    BetaP and Ffprime-constrained custom (splined) internal plasma profiles.
+
+    """
+
+    def __init__(self, eq=None, betap=None, Raxis=None, psi_n=None, pprime=None, ffprime=None, fvac=None):
+        """
+        eq - Equilibrium object
+        betap - Poloidal beta
+        Raxis - R used in p' and ff' components
+        psi_n - Normalised (0,1) poloidal flux used to defined the profiles
+        pprime - Pressure gradient - dp/dpsi
+        ffprime - f*dfpol/dpsi
+        fvac - Vacuum f = R*Bt
+
+        """
+
+        # Check inputs
+        if eq is None:
+            raise ValueError("No equilibrium object provided")
+        if betap is None:
+            raise ValueError("No betap value provided")
+        if Raxis is None:
+            raise ValueError("No Raxis value provided")
+        if psi_n is None:
+            raise ValueError("No psi_n data provided")
+        if pprime is None:
+            raise ValueError("No pprime data provided")
+        if ffprime is None:
+            raise ValueError("No ffprime data provided")
+        if fvac is None:
+            raise ValueError("No fvac data provided")
+
+        # Set values for later use
+        self.eq = eq
+        self.betap = betap
+        self.Raxis = Raxis
+        self.psi_n_points = psi_n
+        self.pprime_points = pprime
+        self.ffprime_points = ffprime
+        self._fvac = fvac
+
+        # Create 1D splines for the internal profiles - these will be like jtorshape
+        self.pprime_spline = interp1d(self.psi_n_points,self.pprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+        self.ffprime_spline = interp1d(self.psi_n_points,self.ffprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        # Create 1D splines for the integral of pprime, ffprime - these will be used in constraining BetaP and Ip.
+        pn_points = np.linspace(0.0,1.0,100,endpoint=True)
+
+        def pprime_int_func(pn):
+            val, _ = quad(self.pprime_spline,pn,1.0)
+            return val
+
+        pprime_int_vals = []
+        for pn in pn_points:
+            pprime_int_vals.append(pprime_int_func(pn))
+
+        pprime_int_vals = np.asarray(pprime_int_vals)
+
+        self.pprime_int_spline = interp1d(pn_points,pprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        def ffprime_int_func(pn):
+            val, _ = quad(self.ffprime_spline,pn,1.0)
+            return val
+
+        ffprime_int_vals = []
+        for pn in pn_points:
+            ffprime_int_vals.append(ffprime_int_func(pn))
+
+        ffprime_int_vals = np.asarray(ffprime_int_vals)
+
+        self.ffprime_int_spline = interp1d(pn_points,ffprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+    def Jtor(self, R, Z, psi, psi_bndry=None):
+        """Calculate toroidal plasma current
+
+        Jtor = R*pprime + ffprime/(R * mu0)
+        """
+
+        # Intermediary update of the plasma
+        # boundary and axis flux
+        self.eq._updateBoundaryPsi(psi)
+        psi_bndry = self.eq.psi_bndry
+        psi_axis = self.eq.psi_axis
+        mask = self.eq.mask
+
+        dR = R[1, 0] - R[0, 0]
+        dZ = Z[0, 1] - Z[0, 0]
+
+        psi_norm = (psi - psi_axis) / (psi_bndry - psi_axis)
+
+        pprime_shape = self.pprime_spline(psi_norm)
+        ffprime_shape = self.ffprime_spline(psi_norm)
+        
+        if mask is not None:
+            pprime_shape *= mask
+            ffprime_shape *= mask
+
+        # Now apply constraints to define constants
+
+        # Need integral of pprime_shape to calculate pressure
+        # as p(psinorm) = - (L*Beta0/Raxis) * pshape(psinorm)
+
+        def pshape(psinorm):
+            shapeintegral = self.pprime_int_spline(psinorm)
+            shapeintegral *= psi_bndry - psi_axis
+            return shapeintegral
+
+        nx, ny = psi_norm.shape
+        pfunc = zeros((nx, ny))
+        for i in range(1, nx - 1):
+            for j in range(1, ny - 1):
+                if (psi_norm[i, j] >= 0.0) and (psi_norm[i, j] < 1.0):
+                    pfunc[i, j] = pshape(psi_norm[i, j])
+        if mask is not None:
+            pfunc *= mask
+
+        # Integrate over plasma
+        # betap = (2mu0) * volume_av(p) / (flux_surf_av(B_poloidal**2))
+        #       = - (2L*Beta0*mu0/Raxis) * volume_av(pfunc) / (flux_surf_av(B_poloidal**2))
+
+        p_int = self.eq.calc_volume_averaged(pfunc)
+        b_int = self.eq.calc_volume_averaged(self.eq.Bpol(R ,Z)**2.0)
+        
+        # self.betap = - (2*LBeta0*mu0/ self.Raxis) * (p_int/b_int)
+        LBeta0 = (b_int/p_int) * (- self.betap * self.Raxis)/(2*mu0)
+        
+        # Constrain Ffprime = ffprime_spline
+        # Ffprime = L*(1-Beta0)*Raxis*ffprime_spline
+        # L*(1-Beta0)*Raxis = 1
+        # L = LBeta0 + (1.0/Raxis)
+
+        L = LBeta0 + (1.0/self.Raxis)
+        Beta0 = LBeta0 / L
+
+        print("Constraints: L = %e, Beta0 = %e" % (L, Beta0))
+
+        # Toroidal current
+        Jtor = L *( (pprime_shape * Beta0 * R / self.Raxis) + ((1 - Beta0) * self.Raxis * ffprime_shape/ (R * mu0)) )
+
+        self.L = L
+        self.Beta0 = Beta0
+
+        self.psi_bndry = psi_bndry
+        self.psi_axis = psi_axis
+
+        return Jtor
+
+    # Profile functions
+    def pprime(self, pn):
+        """
+        dp/dpsi as a function of normalised psi. 0 outside core.
+        Calculate pprimeshape inside the core only
+        """
+        shape = self.pprime_spline(pn)
+        return self.L * self.Beta0 / self.Raxis * shape
+
+    def ffprime(self, pn):
+        """
+        f * df/dpsi as a function of normalised psi. 0 outside core.
+        Calculate ffprimeshape inside the core only.
+        """
+        shape = self.ffprime_spline(pn)
+        return self.L * (1 - self.Beta0) * self.Raxis * shape
+
+    def fvac(self):
+        return self._fvac
+
+class PaxisFfprimeConstrainedSplineProfiles(Profile):
+    """
+    Paxis and Ffprime-constrained custom (splined) internal plasma profiles.
+
+    """
+
+    def __init__(self, eq=None, paxis=None, Raxis=None, psi_n=None, pprime=None, ffprime=None, fvac=None):
+        """
+        eq - Equilibrium object
+        betap - Poloidal beta
+        Raxis - R used in p' and ff' components
+        psi_n - Normalised (0,1) poloidal flux used to defined the profiles
+        pprime - Pressure gradient - dp/dpsi
+        ffprime - f*dfpol/dpsi
+        fvac - Vacuum f = R*Bt
+
+        """
+
+        # Check inputs
+        if eq is None:
+            raise ValueError("No equilibrium object provided")
+        if paxis is None:
+            raise ValueError("No paxis value provided")
+        if Raxis is None:
+            raise ValueError("No Raxis value provided")
+        if psi_n is None:
+            raise ValueError("No psi_n data provided")
+        if pprime is None:
+            raise ValueError("No pprime data provided")
+        if ffprime is None:
+            raise ValueError("No ffprime data provided")
+        if fvac is None:
+            raise ValueError("No fvac data provided")
+
+        # Set values for later use
+        self.eq = eq
+        self.paxis = paxis
+        self.Raxis = Raxis
+        self.psi_n_points = psi_n
+        self.pprime_points = pprime
+        self.ffprime_points = ffprime
+        self._fvac = fvac
+
+        # Create 1D splines for the internal profiles - these will be like jtorshape
+        self.pprime_spline = interp1d(self.psi_n_points,self.pprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+        self.ffprime_spline = interp1d(self.psi_n_points,self.ffprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        # Create 1D splines for the integral of pprime, ffprime - these will be used in constraining BetaP and Ip.
+        pn_points = np.linspace(0.0,1.0,100,endpoint=True)
+
+        def pprime_int_func(pn):
+            val, _ = quad(self.pprime_spline,pn,1.0)
+            return val
+
+        pprime_int_vals = []
+        for pn in pn_points:
+            pprime_int_vals.append(pprime_int_func(pn))
+
+        pprime_int_vals = np.asarray(pprime_int_vals)
+
+        self.pprime_int_spline = interp1d(pn_points,pprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        def ffprime_int_func(pn):
+            val, _ = quad(self.ffprime_spline,pn,1.0)
+            return val
+
+        ffprime_int_vals = []
+        for pn in pn_points:
+            ffprime_int_vals.append(ffprime_int_func(pn))
+
+        ffprime_int_vals = np.asarray(ffprime_int_vals)
+
+        self.ffprime_int_spline = interp1d(pn_points,ffprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+    def Jtor(self, R, Z, psi, psi_bndry=None):
+        """Calculate toroidal plasma current
+
+        Jtor = R*pprime + ffprime/(R * mu0)
+        """
+
+        # Intermediary update of the plasma
+        # boundary and axis flux
+        self.eq._updateBoundaryPsi(psi)
+        psi_bndry = self.eq.psi_bndry
+        psi_axis = self.eq.psi_axis
+        mask = self.eq.mask
+
+        dR = R[1, 0] - R[0, 0]
+        dZ = Z[0, 1] - Z[0, 0]
+
+        psi_norm = (psi - psi_axis) / (psi_bndry - psi_axis)
+
+        pprime_shape = self.pprime_spline(psi_norm)
+        ffprime_shape = self.ffprime_spline(psi_norm)
+        
+        if mask is not None:
+            pprime_shape *= mask
+            ffprime_shape *= mask
+
+        # Now apply constraints to define constants
+
+        # Need integral of pprime_shape to calculate pressure
+        # as p(psinorm) = - (L*Beta0/Raxis) * pshape(psinorm)
+
+        shapeintegral = self.pprime_int_spline(0.0)
+        shapeintegral *= psi_bndry - psi_axis
+
+        # Pressure on axis is
+        #
+        # paxis = - (L*Beta0/Raxis) * shapeintegral
+        #
+
+        LBeta0 = -self.paxis * self.Raxis / shapeintegral
+        
+        # Constrain Ffprime = ffprime_spline
+        # Ffprime = L*(1-Beta0)*Raxis*ffprime_spline
+        # L*(1-Beta0)*Raxis = 1
+        # L = LBeta0 + (1.0/Raxis)
+
+        L = LBeta0 + (1.0/self.Raxis)
+        Beta0 = LBeta0 / L
+
+        print("Constraints: L = %e, Beta0 = %e" % (L, Beta0))
+
+        # Toroidal current
+        Jtor = L *( (pprime_shape * Beta0 * R / self.Raxis) + ((1 - Beta0) * self.Raxis * ffprime_shape/ (R * mu0)) )
+
+        self.L = L
+        self.Beta0 = Beta0
+
+        self.psi_bndry = psi_bndry
+        self.psi_axis = psi_axis
+
+        return Jtor
+
+    # Profile functions
+    def pprime(self, pn):
+        """
+        dp/dpsi as a function of normalised psi. 0 outside core.
+        Calculate pprimeshape inside the core only
+        """
+        shape = self.pprime_spline(pn)
+        return self.L * self.Beta0 / self.Raxis * shape
+
+    def ffprime(self, pn):
+        """
+        f * df/dpsi as a function of normalised psi. 0 outside core.
+        Calculate ffprimeshape inside the core only.
+        """
+        shape = self.ffprime_spline(pn)
+        return self.L * (1 - self.Beta0) * self.Raxis * shape
+
+    def fvac(self):
+        return self._fvac
+
+class PprimeFfprimeConstrainedSplineProfiles(Profile):
+    """
+    Pprime and Ffprime-constrained custom (splined) internal plasma profiles.
+
+    """
+
+    def __init__(self, eq=None, Raxis=None, psi_n=None, pprime=None, ffprime=None, fvac=None):
+        """
+        eq - Equilibrium object
+        Raxis - R used in p' and ff' components
+        psi_n - Normalised (0,1) poloidal flux used to defined the profiles
+        pprime - Pressure gradient - dp/dpsi
+        ffprime - f*dfpol/dpsi
+        fvac - Vacuum f = R*Bt
+
+        """
+
+        # Check inputs
+        if eq is None:
+            raise ValueError("No equilibrium object provided")
+        if Raxis is None:
+            raise ValueError("No Raxis value provided")
+        if psi_n is None:
+            raise ValueError("No psi_n data provided")
+        if pprime is None:
+            raise ValueError("No pprime data provided")
+        if ffprime is None:
+            raise ValueError("No ffprime data provided")
+        if fvac is None:
+            raise ValueError("No fvac data provided")
+
+        # Set values for later use
+        self.eq = eq
+        self.Raxis = Raxis
+        self.psi_n_points = psi_n
+        self.pprime_points = pprime
+        self.ffprime_points = ffprime
+        self._fvac = fvac
+
+        # Create 1D splines for the internal profiles - these will be like jtorshape
+        self.pprime_spline = interp1d(self.psi_n_points,self.pprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+        self.ffprime_spline = interp1d(self.psi_n_points,self.ffprime_points,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        # Create 1D splines for the integral of pprime, ffprime - these will be used in constraining BetaP and Ip.
+        pn_points = np.linspace(0.0,1.0,100,endpoint=True)
+
+        def pprime_int_func(pn):
+            val, _ = quad(self.pprime_spline,pn,1.0)
+            return val
+
+        pprime_int_vals = []
+        for pn in pn_points:
+            pprime_int_vals.append(pprime_int_func(pn))
+
+        pprime_int_vals = np.asarray(pprime_int_vals)
+
+        self.pprime_int_spline = interp1d(pn_points,pprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        def ffprime_int_func(pn):
+            val, _ = quad(self.ffprime_spline,pn,1.0)
+            return val
+
+        ffprime_int_vals = []
+        for pn in pn_points:
+            ffprime_int_vals.append(ffprime_int_func(pn))
+
+        ffprime_int_vals = np.asarray(ffprime_int_vals)
+
+        self.ffprime_int_spline = interp1d(pn_points,ffprime_int_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+    def Jtor(self, R, Z, psi, psi_bndry=None):
+        """Calculate toroidal plasma current
+
+        Jtor = R*pprime + ffprime/(R * mu0)
+        """
+
+        # Intermediary update of the plasma
+        # boundary and axis flux
+        self.eq._updateBoundaryPsi(psi)
+        psi_bndry = self.eq.psi_bndry
+        psi_axis = self.eq.psi_axis
+        mask = self.eq.mask
+
+        dR = R[1, 0] - R[0, 0]
+        dZ = Z[0, 1] - Z[0, 0]
+
+        psi_norm = (psi - psi_axis) / (psi_bndry - psi_axis)
+
+        pprime_shape = self.pprime_spline(psi_norm)
+        ffprime_shape = self.ffprime_spline(psi_norm)
+        
+        if mask is not None:
+            pprime_shape *= mask
+            ffprime_shape *= mask
+
+        # Now apply constraints to define constants
+
+        LBeta0 = self.Raxis
+        L = self.Raxis + (1.0/self.Raxis)
+        Beta0 = LBeta0/L
+
+        print("Constraints: L = %e, Beta0 = %e" % (L, Beta0))
+
+        # Toroidal current
+        Jtor = L *( (pprime_shape * Beta0 * R / self.Raxis) + ((1 - Beta0) * self.Raxis * ffprime_shape/ (R * mu0)) )
+
+        self.L = L
+        self.Beta0 = Beta0
+
+        self.psi_bndry = psi_bndry
+        self.psi_axis = psi_axis
+
+        return Jtor
+
+    # Profile functions
+    def pprime(self, pn):
+        """
+        dp/dpsi as a function of normalised psi. 0 outside core.
+        Calculate pprimeshape inside the core only
+        """
+        shape = self.pprime_spline(pn)
+        return self.L * self.Beta0 / self.Raxis * shape
+
+    def ffprime(self, pn):
+        """
+        f * df/dpsi as a function of normalised psi. 0 outside core.
+        Calculate ffprimeshape inside the core only.
+        """
+        shape = self.ffprime_spline(pn)
+        return self.L * (1 - self.Beta0) * self.Raxis * shape
+
+    def fvac(self):
+        return self._fvac
     
 class ProfilesPprimeFfprime:
     """
