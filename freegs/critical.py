@@ -358,22 +358,13 @@ def find_psisurface(eq, psifunc, r0, z0, r1, z1, psival=1.0, n=100, axis=None):
         # Only one value
         ind = argmax(pnorm > psival)
 
-        if ind == 0:
-            # If the point is very close to the magnetic axis, don't
-            # try to do extrapolation.
-            r = r[ind]
-            z = z[ind]
-        else:
-            # Edited by Bhavin 31/07/18
-            # Changed 1.0 to psival in f
-            # make f gradient to psival surface
-            f = (pnorm[ind] - psival) / (pnorm[ind] - pnorm[ind - 1])
-            
-            # Interpolate between points
-            r = (1.0 - f) * r[ind] + f * r[ind - 1]
-            z = (1.0 - f) * z[ind] + f * z[ind - 1]
+        # Edited by Bhavin 31/07/18
+        # Changed 1.0 to psival in f
+        # make f gradient to psival surface
+        f = (pnorm[ind] - psival) / (pnorm[ind] - pnorm[ind - 1])
 
-            if f > 1.0: warn(f"find_psisurface has encountered an extrapolation. This will probably result in a point where you don't expect it.")
+        r = (1.0 - f) * r[ind] + f * r[ind - 1]
+        z = (1.0 - f) * z[ind] + f * z[ind - 1]
 
     if axis is not None:
         axis.plot(r, z, "bo")
@@ -404,8 +395,13 @@ def find_separatrix(
     if (opoint is None) or (xpoint is None):
         opoint, xpoint = find_critical(eq.R, eq.Z, psi)
 
-    psinorm = (psi - opoint[0][2]) / (eq.psi_bndry - opoint[0][2])
-    
+    if not eq.is_limited:
+        psi_bndry = xpoint[0][2]
+    else:
+        psi_bndry = eq.psi_bndry
+
+    psinorm = (psi - opoint[0][2]) / (psi_bndry - opoint[0][2])
+
     psifunc = interpolate.RectBivariateSpline(eq.R[:, 0], eq.Z[0, :], psinorm)
 
     r0, z0 = opoint[0][0:2]
@@ -514,8 +510,8 @@ def find_safety(
                 psifunc,
                 r0,
                 z0,
-                r0 + np.ptp(eq.R) * sin(theta),
-                z0 + np.ptp(eq.Z) * cos(theta),
+                r0 + 8.0 * sin(theta),
+                z0 + 8.0 * cos(theta),
                 psival=psin,
                 axis=axis,
             )

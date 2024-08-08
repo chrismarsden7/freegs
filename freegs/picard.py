@@ -40,6 +40,7 @@ def solve(
     check_limited=False,
     wait_for_limited=False,
     limit_it=0,
+    adaptive_blending=False,
 ):
     """
     Perform Picard iteration to find solution to the Grad-Shafranov equation
@@ -65,6 +66,7 @@ def solve(
     wait_for_limited - True/False toggle to keep iterating until the plasma is limited.
     limit_it - Integer > Sometimes waiting some number of interations before checking if
     a plasma is limited can improve convergence. This sets the number of iterations to wait.
+    adaptive_blending - True/False toggle to control the use of adaptive blending to improve convergence.
     """
 
     if constrain is not None:
@@ -105,6 +107,8 @@ def solve(
 
     # Start main loop
     while True:
+
+        print('Step: '+str(iteration))
 
         if show:
             # Plot state of plasma equilibrium
@@ -188,6 +192,10 @@ def solve(
             # User wants to check if plasma limited and it is actually limited
             ok_to_break = True
 
+        elif not np.argmax(psi) > 0:
+            # No flux - something probably went wrong. Kill the run.
+            ok_to_break = True
+
         else:
             # The user wants to wait for a limited plasma. The plasma is not limited.
             ok_to_break = False
@@ -195,8 +203,7 @@ def solve(
         if show:
             print("psi_relchange: " + str(psi_relchange))
             print("bndry_relchange: " + str(bndry_relchange))
-            print("bndry_change: " + str(bndry_change))
-            print("\n")
+            print("")
 
         # Check if the changes in psi are small enough and that it is ok to start checking for convergence
         if (
@@ -204,11 +211,36 @@ def solve(
             and ((bndry_relchange < rtol) or (abs(bndry_change) < atol))
             and ok_to_break
         ):
+            # Analyse equilibrium geometry
+            eq.check_geometry()
+
+            # Finished with solve
             break
 
         # Adjust the coil currents
         if constrain is not None:
             constrain(eq)
+
+        if adaptive_blending:
+
+            if iteration < int(0.5*maxits):
+
+                if iteration > 4 and 10.0 * rtol < psi_relchange <= 50.0 * rtol:
+
+                    blend = 0.3
+
+                elif iteration > 4 and 5.0 * rtol < psi_relchange <= 10.0 * rtol:
+
+
+                    blend = 0.5
+
+                elif iteration > 4 and psi_relchange <= 5.0 * rtol:
+
+                    blend = 0.7
+
+            else:
+
+                blend = 0.0
 
         psi = (1.0 - blend) * eq.psi() + blend * psi_last
 

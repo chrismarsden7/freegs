@@ -623,7 +623,6 @@ class FluxLoopSensor(Sensor):
     def plot(self, axis):
         axis.plot(self.R, self.Z, 'ro')
 
-
 class Machine:
     """
     Represents the machine (Tokamak), including
@@ -858,12 +857,24 @@ class Machine:
         """
         for label, coil in self.coils:
             axis = coil.plot(axis=axis, show=False)
+
+        axis.plot(self.wall.R,self.wall.Z,'k')
+
         if show:
             import matplotlib.pyplot as plt
 
             plt.show()
+
         return axis
 
+    def getCoilNames(self):
+        """
+        Returns a list of coil names
+        """
+        names = []
+        for label, coil in self.coils:
+            names.append(label)
+        return names
 
 def EmptyTokamak():
     """
@@ -1042,7 +1053,6 @@ def MAST():
     ]
 
     return Machine(coils)
-
 
 def MAST_sym():
     """

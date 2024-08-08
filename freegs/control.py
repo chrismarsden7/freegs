@@ -54,6 +54,7 @@ class constrain(object):
         psivals=[],
         current_lims=None,
         max_total_current=None,
+        g_z=None,
     ):
         """
         Create an instance, specifying the constraints to apply
@@ -64,6 +65,7 @@ class constrain(object):
         self.psivals = psivals
         self.current_lims = current_lims
         self.max_total_current = max_total_current
+        self.g_z = g_z
 
     def __call__(self, eq):
         """
@@ -134,56 +136,88 @@ class constrain(object):
             dot(transpose(A), b),
         )
 
-        '''# Now use the initial analytical soln to guide constrained solve
+        # Now use the initial analytical soln to guide constrained solve
 
-        # Establish constraints on changes in coil currents from the present
-        # and max/min coil current constraints
+        if self.current_lims is not None:
+            # Establish constraints on changes in coil currents from the present
+            # and max/min coil current constraints
 
-        current_change_bounds = []
+            current_change_bounds = []
 
-        if self.current_lims is None:
-            for i in range(ncontrols):
-                current_change_bounds.append((-inf, inf))
-        else:
-            for i in range(ncontrols):
-                cur = tokamak.controlCurrents()[i]
-                lower_lim = self.current_lims[i][0] - cur
-                upper_lim = self.current_lims[i][1] - cur
-                current_change_bounds.append((lower_lim, upper_lim))
+            if self.current_lims is None:
+                for i in range(ncontrols):
+                    current_change_bounds.append((-inf, inf))
+            else:
+                for i in range(ncontrols):
+                    cur = tokamak.controlCurrents()[i]
+                    lower_lim = self.current_lims[i][0] - cur
+                    upper_lim = self.current_lims[i][1] - cur
+                    current_change_bounds.append((lower_lim, upper_lim))
 
-        current_change_bnds = array(current_change_bounds)
+            current_change_bnds = array(current_change_bounds)
 
-        # Reform the constraint matrices to include Tikhonov regularisation
-        A2 = np.concatenate([A, self.gamma * eye(ncontrols)])
-        b2 = np.concatenate([b, np.zeros(ncontrols)])
+            # Reform the constraint matrices to include Tikhonov regularisation
+            A2 = np.concatenate([A, self.gamma * eye(ncontrols)])
+            b2 = np.concatenate([b, np.zeros(ncontrols)])
 
-        # The objetive function to minimize
-        # || A2x - b2 ||^2
-        def objective(x):
-            return (norm((A2 @ x) - b2)) ** 2
+            # The objetive function to minimize
+            # || A2x - b2 ||^2
+            def objective(x):
+                return (norm((A2 @ x) - b2)) ** 2
 
-        # Additional constraints on the optimisation
-        cons = []
+            # Additional constraints on the optimisation
+            cons = []
 
-        def max_total_currents(x):
-            sum = 0.0
-            for delta, i in zip(x, tokamak.controlCurrents()):
-                sum += abs(delta + i)
-            return -(sum - self.max_total_current)
+            def max_total_currents(x):
+                sum = 0.0
+                for delta, i in zip(x, tokamak.controlCurrents()):
+                    sum += abs(delta + i)
+                return -(sum - self.max_total_current)
 
-        if self.max_total_current is not None:
-            con1 = {"type": "ineq", "fun": max_total_currents}
-            cons.append(con1)
+            if self.max_total_current is not None:
+                con1 = {"type": "ineq", "fun": max_total_currents}
+                cons.append(con1)
 
-        # Use the analytical current change as the initial guess
-        if self.current_change.shape[0] > 0:
-            x0 = self.current_change
-            sol = optimize.minimize(
-                objective, x0, method="SLSQP", bounds=current_change_bnds, constraints=cons
-            )
+            # Use the analytical current change as the initial guess
+            if self.current_change.shape[0] > 0:
+                x0 = self.current_change
+                sol = optimize.minimize(
+                    objective, x0, method="SLSQP", bounds=current_change_bnds, constraints=cons
+                )
 
-            self.current_change = sol.x
-            tokamak.controlAdjust(self.current_change)'''
+                self.current_change = sol.x
+                tokamak.controlAdjust(self.current_change)
+
+        '''
+        Eliminate source of vertical instability using the method described
+        in the TES reference paper: arXiv:1503.03135.
+        In order to do this, the user must have included a 'VCC' Circuit in the tokamak,
+        with a pair of point-source coils wired in anti-series. The current in this circuit
+        is alterered at each Picard itteration step in order to counteract the radial vacuum
+        field at the plasma current centre (Rcur,Zcur).
+
+        I_VCC = -g_z * (B_r,vac/B_r,VCC,control)|_(Rcur,Zcur)
+        '''
+
+        if 'VCC' in tokamak.getCoilNames() and eq.Jtor is not None:
+
+            # Get the current centre of the plasma
+            Rcur, Zcur = eq.currentAxis()
+
+            # Get the vacuum radial field at the current centre
+            B_r_vac = eq.tokamak.Br(Rcur,Zcur) - eq.tokamak['VCC'].Br(Rcur,Zcur)
+
+            # Get the radial field from the VCC circuit at unit current at the current centre
+            B_r_vcc_control = eq.tokamak['VCC'].controlBr(Rcur,Zcur)
+
+            # g_z set by the user. 2.0<=g_z<=2.5 from TES
+            g_z = self.g_z
+
+            # Calculate the new VCC coil current
+            I_feedback_vcc = -g_z * (B_r_vac/B_r_vcc_control)
+
+            # Adjust the VCC circuit current
+            eq.tokamak['VCC'].current = I_feedback_vcc
 
         # Store info for user
         self.current_change = self.current_change
