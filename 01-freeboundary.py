@@ -47,10 +47,30 @@ freegs.solve(eq,          # The equilibrium to adjust
 # eq now contains the solution
 
 print("Done!")
-
+print("Plasma volume: %e cubic metres" % (eq.plasmaVolume()))
 print("Plasma current: %e Amps" % (eq.plasmaCurrent()))
 print("Plasma pressure on axis: %e Pascals" % (eq.pressure(0.0)))
-print("Poloidal beta: %e" % (eq.poloidalBeta()))
+print("Poloidal beta (1): %f" % (eq.poloidalBeta()))
+print("Poloidal beta (2): %f" % (eq.poloidalBeta2()))
+print("Poloidal beta (3): %f" % (eq.poloidalBeta3()))
+print("li (1): %f" % (eq.internalInductance1()))
+print("li (2): %f" % (eq.internalInductance2()))
+print("li (3): %f" % (eq.internalInductance3()))
+print("q on axis: %f" % (eq.q(0.0)))
+print("q95 on axis: %f" % (eq.q(0.95)))
+print("Internal Inductance: %e H" % (eq.internalInductance()))
+print("Major radius: %f m" % (eq.Rgeometric()))
+print("Height: %f m" % (eq.Zgeometric()))
+print("Elongation: %f" % (eq.elongation()))
+print("Elongation upper: %f" % (eq.elongationUpper()))
+print("Elongation lower: %f" % (eq.elongationLower()))
+print("Triangularity: %f" % (eq.triangularity()))
+print("Triangularity upper: %f" % (eq.triangularityUpper()))
+print("Triangularity lower: %f" % (eq.triangularityLower()))
+print("Squareness upper outer: %f" % (eq.squarenessUpperOuter()))
+print("Squareness lower outer: %f" % (eq.squarenessLowerOuter()))
+print("Squareness upper inner: %f" % (eq.squarenessUpperInner()))
+print("Squareness lower inner: %f" % (eq.squarenessLowerInner()))
 
 # Currents in the coils
 tokamak.printCurrents()

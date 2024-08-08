@@ -273,14 +273,22 @@ class Coil:
 
         The area of the coil is used to set the radius
         """
-        minor_radius = np.sqrt(self.area / np.pi)
 
-        import matplotlib.pyplot as plt
+        if self.area > 0.0:
 
-        if axis is None:
-            fig = plt.figure()
-            axis = fig.add_subplot(111)
+            minor_radius = np.sqrt(self.area / np.pi)
 
-        circle = plt.Circle((self.R, self.Z), minor_radius, color="gray")
-        axis.add_artist(circle)
+            import matplotlib.pyplot as plt
+
+            if axis is None:
+                fig = plt.figure()
+                axis = fig.add_subplot(111)
+
+            circle = plt.Circle((self.R, self.Z), minor_radius, color="gray")
+            axis.add_artist(circle)
+
+        else:
+
+            axis.scatter(self.R,self.Z,color='b',marker='x')
+            
         return axis

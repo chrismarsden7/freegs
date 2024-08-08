@@ -6,7 +6,9 @@ state, including plasma and coil currents
 from numpy import pi, meshgrid, linspace, exp, array
 import numpy as np
 from scipy import interpolate
-from scipy.integrate import romb, cumtrapz  # Romberg integration
+from scipy.integrate import romb, cumulative_trapezoid  # Romberg integration
+from scipy.optimize import leastsq
+from scipy.interpolate import interp1d
 
 from .boundary import fixedBoundary, freeBoundary
 from . import critical
@@ -24,6 +26,7 @@ from . import machine
 import matplotlib.pyplot as plt
 
 from shapely import intersection, LineString
+from shapely.geometry import Polygon
 
 class Equilibrium:
     """
@@ -110,6 +113,8 @@ class Equilibrium:
         self.is_limited = False
         self.Rlim = None
         self.Zlim = None
+
+        self.psi_bndry = None
 
         if psi is None:
             # Starting guess for psi
@@ -207,17 +212,124 @@ class Equilibrium:
         """
         return self._current
 
-    def plasmaVolume(self):
-        """Calculate the volume of the plasma in m^3"""
+    def plasmaVolume(self,psiN=None):
+        """
+        Calculate the volume of the plasma in m^3 that is 
+        enclosed within the flux surface given by psiN.
 
-        # Volume element
-        dV = 2.0 * pi * self.R * self.dR * self.dZ
+        psiN should be between 0 and 1.
+        """
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
+        # Volume elements
+        dV_not_masked = 2.0 * pi * self.R * self.dR * self.dZ
 
-        # Integrate volume in 2D
-        return romb(romb(dV))
+        # Get psi on the grid
+        psi = self.psi()
+
+        # Get the opoint and primary xpoint psi
+        opt, xpt = critical.find_critical(self.R, self.Z, psi)
+
+        # If psiN is not specified, use the primary separatrix
+        if psiN is None:
+
+            psiN = 1.0
+
+        if np.ndim(psiN) == 0:
+
+            if psiN == 0.0:
+
+                return 0.0
+
+            else:
+
+                # Get the psi of the specified psiN
+                psi_target = self.psi_psiN(psiN)
+
+                # Mask the core up to the flux surface of the specified psiN
+                mask = critical.core_mask(
+                    self.R, self.Z, psi, opt, xpt, psi_target
+                )
+
+                # Only include points in the mask
+                dV = dV_not_masked * mask
+
+                # Integrate volume in 2D
+                return romb(romb(dV))
+
+        else:
+
+            vals = []
+
+            for pn in psiN:
+
+                if pn == 0.0:
+
+                    vals.append(0.0)
+
+                else:
+
+                    # Get the psi of the specified psiN
+                    psi_target = self.psi_psiN(pn)
+
+                    # Mask the core up to the flux surface of the specified psiN
+                    mask = critical.core_mask(
+                        self.R, self.Z, psi, opt, xpt, psi_target
+                    )
+
+                    # Only include points in the mask
+                    dV = dV_not_masked * mask
+
+                    # Integrate volume in 2D
+                    val = romb(romb(dV))
+
+                    vals.append(val)
+
+            return np.asarray(vals)
+
+    def dV_dpsiN(self,psiN=None):
+        """Calculate dV/dpsiN"""
+
+        eps = 0.01
+
+        if psiN is None:
+
+            psiN = 1.0
+
+        if np.ndim(psiN) == 0:
+
+            if psiN <= eps:
+
+                return self.plasmaVolume(eps)/eps
+
+            elif psiN >= 1.0-eps:
+
+                return (self.plasmaVolume(1.0)-self.plasmaVolume(1.0-eps))/eps
+            
+            else: # eps < psiN < 1 - eps
+
+                return (self.plasmaVolume(psiN+eps)-self.plasmaVolume(psiN-eps))/(2.*eps)
+
+        else:
+
+            vals = []
+
+            for pn in psiN:
+
+                if pn <= eps:
+
+                    val = self.plasmaVolume(eps)/eps
+
+                elif pn >= 1.0-eps:
+
+                    val = (self.plasmaVolume(1.0)-self.plasmaVolume(1.0-eps))/eps
+                
+                else: # eps < psiN < 1 - eps
+
+                    val = (self.plasmaVolume(pn+eps)-self.plasmaVolume(pn-eps))/(2.*eps)
+
+                vals.append(val)
+
+            return np.asarray(vals)
 
     def plasmaBr(self, R, Z):
         """
@@ -258,7 +370,7 @@ class Equilibrium:
         Toroidal magnetic field
         """
         # Normalised psi
-        psi_norm = (self.psiRZ(R, Z) - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiNRZ(R,Z)
 
         # Get f = R * Btor in the core. May be invalid outside the core
         fpol = self.fpol(psi_norm)
@@ -304,6 +416,13 @@ class Equilibrium:
 
         return psiN * (self.psi_bndry - self.psi_axis) + self.psi_axis
 
+    def psiN_psi(self,psi):
+        """
+        Normalised poloidal flux for a given value of poloidal flux.
+        """
+
+        return (psi - self.psi_axis) / (self.psi_bndry - self.psi_axis)        
+
     def psiRZ(self, R, Z):
         """
         Return poloidal flux psi at given (R,Z) location
@@ -317,6 +436,26 @@ class Equilibrium:
         """
         return (self.psiRZ(R, Z) - self.psi_axis) / (self.psi_bndry - self.psi_axis)
 
+    def rhoPol_psi(self, psi):
+        """
+        Return rho poloidal = sqrt(psiN) for a given psi
+        """
+
+        psiN = self.psiN_psi(psi)
+        rho_pol = np.sqrt(psiN)
+
+        return rho_pol
+
+    def rhoPolRZ(self, R, Z):
+        """
+        Return rho poloidal = sqrt(psiN) for a point at a given R,Z
+        """
+
+        psiN = self.psiNRZ(R,Z)
+        rho_pol = np.sqrt(psiN)
+
+        return rho_pol
+
     def fpol(self, psinorm):
         """
         Return f = R*Bt at specified values of normalised psi
@@ -329,72 +468,255 @@ class Equilibrium:
         """
         return self._profiles.fvac()
 
-    def q(self, psinorm=None, npsi=100):
+    def q_axis(self):
+        '''
+        Calculates the safety factor on the magnetic axis. This uses the definition
+        in Friedberg's Ideal MHD book
+
+        q0 = (Btor_ax / (mu R_ax Jtor_ax) ) * ( (1 + kappa_0**2) / kappa_0)
+
+        Where the subscript ax are quantities calculated at the magnetic axis
+        and kappa_0 is the on axis elongation, defined as
+
+        kappa_0**2 = (d2 psi / dR2) / (d2 psi / dZ2) where d2 psi / dx2 is the
+        second derivative of the poloidal magnetic flux psi, at the magnetic axis
+        '''
+
+        # Coordinate of the magnetic axis
+        Rax = self.Rmagnetic()
+        Zax = self.Zmagnetic()
+
+        # Toroidal field
+        Btor_ax = self.Btor(Rax,Zax)
+
+        # Current density
+        Jtor_ax = self.JtorRZ(Rax,Zax)
+
+        # Intermediate variable
+        alpha = Btor_ax / (mu0*Rax*Jtor_ax)
+
+        # Second derivatives of psi wrt R and Z
+        d2_psi_dR2_ax = self.psi_func(Rax,Zax,dx=2,grid=False)
+        d2_psi_dZ2_ax = self.psi_func(Rax,Zax,dy=2,grid=False)
+
+        # On axis elongation
+        kappa_ax = np.sqrt(d2_psi_dR2_ax/d2_psi_dZ2_ax)
+
+        # On axis safety factor
+        q0 = alpha*((1.+kappa_ax*kappa_ax)/kappa_ax)
+
+        return q0
+
+    def q(self, psiN=None, npoints=1000):
+        '''
+        Calculates the safety factor q at specified values of normalised psi.
+
+        q = (1/ 2pi) * int( (Btor/(R*Bpol) * dl) )
+        '''
+
+        if psiN is None:
+
+            psiN = 0.95
+
+        if np.ndim(psiN) == 0:
+
+            if psiN == 0:
+                q = self.q_axis()
+
+            else:
+
+                Rsurf, Zsurf = self.psi_surfRZ(psiN, npoints=npoints)
+
+                # Get the poloidal field along the surface
+                Bpol_surf = self.Bpol(Rsurf,Zsurf)
+
+                # Get the toroidal field along the surface
+                Btor_surf = self.Btor(Rsurf,Zsurf)
+
+                # Get dl along the surface
+                dl = np.sqrt(np.diff(Rsurf)**2.0 + np.diff(Zsurf)**2.0)
+                dl = np.insert(dl,0,0.0)
+
+                # Get l along the surface
+                l = np.cumsum(dl)
+
+                # Integrand
+                I = Btor_surf / (Rsurf*Bpol_surf)
+
+                q = np.trapz(y=I,x=l) / (2.0 * np.pi)
+
+            return q
+
+        else:
+
+            vals = []
+
+            for pn in psiN:
+
+                if pn == 0:
+                    q = self.q_axis()
+
+                else:
+
+                    Rsurf, Zsurf = self.psi_surfRZ(pn, npoints=npoints)
+
+                    # Get the poloidal field along the surface
+                    Bpol_surf = self.Bpol(Rsurf,Zsurf)
+
+                    # Get the toroidal field along the surface
+                    Btor_surf = self.Btor(Rsurf,Zsurf)
+
+                    # Get dl along the surface
+                    dl = np.sqrt(np.diff(Rsurf)**2.0 + np.diff(Zsurf)**2.0)
+                    dl = np.insert(dl,0,0.0)
+
+                    # Get l along the surface
+                    l = np.cumsum(dl)
+
+                    # Integrand
+                    I = Btor_surf / (Rsurf*Bpol_surf)
+
+                    q = np.trapz(y=I,x=l) / (2.0 * np.pi)
+
+                vals.append(q)
+
+            return vals
+
+    def phi_psi(self, psi):
         """
-        Returns safety factor q at specified values of normalised psi
+        Calculates toroidal flux, phi, at specified values of poloidal flux, psi.
+        q = dphi/dpsi
+        \phi(\psi=\psi_{i}) = \int_{\psi_{i}}^{\psi_{ax}} q \,d\psi
+        \phi(\psi=\psi_{i}) = - \int_{\psi_{ax}}^{\psi_{i}} q \,d\psi
 
-        psinorm is a scalar, list or array of floats betweem 0 and 1.
-
-        >>> safety_factor = eq.q([0.2, 0.5, 0.9])
-
-        If psinorm is None, then q on a uniform psi grid will be returned,
-        along with the psi values
-
-        >>> psinorm, q = eq.q()
-
-        Note: psinorm = 0 is the magnetic axis, and psinorm = 1 is the separatrix.
-              Calculating q on either of these flux surfaces is problematic,
-              and the results will probably not be accurate.
         """
-        if psinorm is None:
-            # An array which doesn't include psinorm = 0 or 1
-            psinorm = linspace(1.0 / (npsi + 1), 1.0, npsi, endpoint=False)
-            return psinorm, critical.find_safety(self, psinorm=psinorm)
 
-        result = critical.find_safety(self, psinorm=psinorm)
-        # Convert to a scalar if only one result
-        if len(result) == 1:
-            return result[0]
+        # As the user may elect to calculate phi at a single value of psi, we must first
+        # prepare many points in psi, and use these to build a profile for phi=phi(psi),
+        # which can later be used to interpolate out phi at the specified psi.
+
+        # psiN of these points
+        psiN_vals = np.linspace(0.0,1.0,101)
+
+        # Corresponding psi of these points
+        psi_vals = self.psi_psiN(psiN_vals)
+
+        # Safety factor of these points
+        q_vals = self.q(psiN_vals)
+
+        # Integrate q wrt psi to get the toroidal flux, phi. phi = 0 @ psiN = 0
+        phi_vals = -1.0*cumulative_trapezoid(y=q_vals,x=psi_vals, initial=0.0)
+
+        # Create 1D interpolator for phi=phi(psi)
+        phi_func = interp1d(psi_vals,phi_vals,kind='linear',fill_value='extrapolate',bounds_error=False)
+
+        # Obtain phi at the user-specified psi
+        result = phi_func(psi)
+
         return result
 
-    def tor_flux(self, psi=None):
+    def phiRZ(self,R,Z):
         """
-        Calculates toroidal flux at specified values of poloidal flux.
-        >>> q = drho/dpsi
-        """
-        psiN = (psi - self.psi_axis) / (self.psi_bndry - self.psi_axis)
-        # Get safety factor of these flux surfaces
-        qvals = self.q(psiN)
-
-        # Integrate q wrt psi to get rho. rho = 0 @ psiN = 0
-        result = cumtrapz(qvals, psi, initial=0.0) * (-1.0 / (2.0 * np.pi))
-
-        # Convert to a scalar if only one result
-        if len(result) == 1:
-            return result[0]
-        return result
-
-    def rhotor(self, psi=None):
-        """
-        Calculates normalised toroidal flux at specified values of
-        poloidal flux.
-         >>> rhotor = sqrt ( tor_flux/max(tor_flux)).
-
-        Maximum toroidal flux shoud be at LCFS.
+        Calculate toroidal flux, phi, at specified values of R,Z.
         """
 
-        torflux = self.tor_flux(psi)
+        # Get the psi at the specified R,Z
+        psi = self.psiRZ(R,Z)
 
-        psi = np.linspace(self.psi_axis, self.psi_bndry, 101, endpoint=True)
-        torflux_for_LCFS = self.tor_flux(psi)
+        # Get the toroidal flux, phi.
+        phi = self.phi_psi(psi)
 
-        max_torflux = np.max(torflux_for_LCFS)
+        return phi
 
-        result = np.sqrt(torflux / max_torflux)
+    def phiN_psi(self, psi=None):
+        """
+        Calculates the normalised toroidal flux, phiN, at specified values of psi.
 
-        if len(result) == 1:
-            return result[0]
-        return result
+        phiN = (phi - phi_ax) / (phi_bndry - phi_ax)
+        phiN = phi/phi_bndry
+
+        as phi_ax = 0 by definition
+        """
+
+        # Get phi_bndry == phi(psi_bndry)
+        phi_bndry = self.phi_psi(self.psi_bndry)
+
+        # Get phi at the user-specified psi
+        phi = self.phi_psi(psi)
+
+        phiN = phi/phi_bndry
+
+        return phiN
+
+    def phiNRZ(self, R,Z):
+        """
+        Calculates the normalised toroidal flux, phiN, at specified values of R,Z.
+        """
+
+        # Get psi at the specified R,Z
+        psi = self.psiRZ(R,Z)
+
+        # Get phiN at these psi
+        phiN = self.phiNpsi(psi)
+
+        return phiN
+
+    def rhoTor_psi(self, psi):
+        """
+        Return rho toroidal = sqrt(phiN) for a given psi
+        """
+
+        # Get the normalised toroidal flux at the user-specified psi
+        phiN = self.phiN_psi(psi)
+
+        # Get rho toroidal
+        rho_tor = np.sqrt(phiN)
+
+        return rho_tor
+
+    def rhoTorRZ(self, R, Z):
+        """
+        Return rho toroidal = sqrt(phiN) for a point at a given R,Z
+        """
+
+        # Get the normalised toroidal flux at the user-specified psi
+        phiN = self.phiNRZ(R,Z)
+
+        # Get rho toroidal
+        rho_tor = np.sqrt(phiN)
+
+        return rho_tor
+
+    def rho_psi(self, R, Z):
+        """
+        Return rho = sqrt(phi/(pi*B0)) where B0 is the vacuum toroidal field on the geometric axis
+        for a given psi. rho has units of length.
+        """
+
+        # Get the toroidal flux at the user-specifid psi
+        phi = self.phi_psi(psi)
+
+        # Get the vacuum toroidal field on the geometric axis
+        B0 = self.fvac()/self.Rgeometric()
+        
+        # Get rho
+        rho = np.sqrt(phi)/(np.pi*B0)
+
+        return rho
+
+    def rhoRZ(self, R, Z):
+        """
+        Return rho = sqrt(phi/(pi*B0)) where B0 is the vacuum toroidal field on the geometric axis
+        for a point at a given R,Z. rho has units of length.
+        """
+
+        # Get psi at the user-specified R,Z
+        psi = self.psiRZ(R,Z)
+
+        # Get rho
+        rho = self.rho_psi(psi)
+
+        return rho
 
     def pprime(self, psinorm):
         """
@@ -407,6 +729,23 @@ class Equilibrium:
         Return ff' at given normalised psi
         """
         return self._profiles.ffprime(psinorm)
+
+    def JtorRZ(self, R, Z):
+        """
+        Return toridal current density Jtor at given R,Z
+        """
+
+        # Get psiN at the R,Z
+        psiN = self.psiNRZ(R,Z)
+
+        # Get the pprime and ffprime at these psiN
+        pprime = self.pprime(psiN)
+        ffprime = self.ffprime(psiN)
+
+        # Calculate Jtor
+        Jtor = R * pprime + ffprime / (mu0 * R)
+
+        return Jtor
 
     def pressure(self, psinorm):
         """
@@ -423,12 +762,12 @@ class Equilibrium:
             :, 0:2
         ]
 
-    def psi_surfRZ(self, psiN=0.995, npoints=360):
+    def psi_surfRZ(self, psiN=1.0, npoints=360):
         """
-        Returns the R,Z of a flux surface specified by a value of psiN.
+        Returns the R,Z of a flux surface specified by a value of psiN. This flux surface is closed on itself.
         """
 
-        surf = critical.find_separatrix(self, opoint=None, xpoint=None, ntheta=200, psi=None, axis=None, psival=psiN)
+        surf = critical.find_separatrix(self, opoint=None, xpoint=None, ntheta=npoints, psi=None, axis=None, psival=psiN)
 
         Rsurf = [point[0] for point in surf]
         Zsurf = [point[1] for point in surf]
@@ -513,6 +852,7 @@ class Equilibrium:
         if opt:
             # Magnetic axis flux taken as primary o-point flux
             self.psi_axis = opt[0][2]
+            self.opt = opt[0]
             """
             Several options depending on if user wishes to check
             if the plasma becomes limited.
@@ -527,7 +867,7 @@ class Equilibrium:
                 Zlimit = self.tokamak.limit_points_Z
 
                 """
-                If an xpoint is present (plasma is potentianlly diverted)
+                If an xpoint is present (plasma is potentially diverted)
                 then we must remove any limit points above/below the
                 primary xpoint as the PFR may land on these points,
                 which would break the algorithm (at present) for extracting the boundary
@@ -684,18 +1024,20 @@ class Equilibrium:
 
         print_forces(self.getForces())
 
-    def innerOuterSeparatrix(self, Z=0.0):
+    def innerOuterSeparatrix(self, Z=None):
         """
-        Locate R co ordinates of separatrix at both
-        inboard and outboard poloidal midplane (Z = 0)
+        Locate R coordinates of separatrix at the specified Z
+        coordinate. Default Z will be the magnetic midplane.
         """
+
+        if Z is None:
+            Z = self.Zmagnetic()
+
         # Find the closest index to requested Z
         Zindex = np.argmin(abs(self.Z[0, :] - Z))
 
-        # Normalise psi at this Z index
-        psinorm = (self.psi()[:, Zindex] - self.psi_axis) / (
-            self.psi_bndry - self.psi_axis
-        )
+        # Normalised psi at this Z index
+        psinorm = self.psiN()[:, Zindex]
 
         # Start from the magnetic axis
         Rindex_axis = np.argmin(abs(self.R[:, 0] - self.Rmagnetic()))
@@ -742,10 +1084,273 @@ class Equilibrium:
 
         return polygons.intersect(separatrix[:, 0], separatrix[:, 1], wall.R, wall.Z)
 
+    def check_geometry(self, npoints=360):
+        """Analyses the geometry of the core plasma, locating key points
+        around the LCFS that define the shape of the core.
+        """
+
+        # Helper function that will (if required) insert the xpoint(s) into the
+        # list of points that constitute the LCFS
+        def insert_point_to_LCFS(Rp,Zp):
+
+            distances = []
+
+            # Calculate the distance between each point on the LCFS and the new point
+            for Rlcfs_i, Zlcfs_i in zip(self.Rlcfs,self.Zlcfs):
+
+                s = np.sqrt((Rlcfs_i - Rp)**2. + (Zlcfs_i - Zp)**2.)
+                distances.append(s)
+
+            indeces_sorted = np.argsort(distances)
+            index_to_insert = max(indeces_sorted[0],indeces_sorted[1])
+
+            self.Rlcfs = np.insert(self.Rlcfs,index_to_insert,Rp)
+            self.Zlcfs = np.insert(self.Zlcfs,index_to_insert,Zp)
+
+        # Get a large number of points along the LCFS
+        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
+        self.Rlcfs = [i[0] for i in separatrix]
+        self.Zlcfs = [i[1] for i in separatrix]
+        self.Rlcfs.append(self.Rlcfs[0])
+        self.Zlcfs.append(self.Zlcfs[0])
+        self.Rlcfs = np.asarray(self.Rlcfs)
+        self.Zlcfs = np.asarray(self.Zlcfs)
+
+        # Locate the extrema points in R, P1 and P3
+
+        # The point of largest R, P1.
+
+        ind_P1 = np.argmax(self.Rlcfs)
+        self.R_P1 = self.Rlcfs[ind_P1]
+        self.Z_P1 = self.Zlcfs[ind_P1]
+
+        # The point of smallest R, P3.
+
+        ind_P3 = np.argmin(self.Rlcfs)
+        self.R_P3 = self.Rlcfs[ind_P3]
+        self.Z_P3 = self.Zlcfs[ind_P3]
+
+        # Get the xpoints
+        self.opt, self.xpt = critical.find_critical(self.R, self.Z, self.psi())
+
+        # Check if the plasma is diverted, and if so, what the configuration is
+        if not self.is_limited:
+
+            if len(self.xpt) == 1: # Only 1 xpoint, hence plasma must be SND
+
+                self.DND = False # Cannot be DND if SND
+
+            else: # More than 1 xpoint, can be either SND or DND
+
+                # Check psi of primary and secondary separatrices. If they are
+                # the same, the plasma is DND
+
+                #if self.xpt[0][2] == self.xpt[1][2]: # DND
+                if abs(self.xpt[1][2]-self.xpt[0][2])/self.xpt[0][2] < 1.0e-04: # DND
+
+                    self.DND = True
+                    self.LSND = False
+                    self.USND = False
+
+                    # Insert first and second xpoints into the LCFS
+                    insert_point_to_LCFS(self.xpt[0][0],self.xpt[0][1])
+                    insert_point_to_LCFS(self.xpt[1][0],self.xpt[1][1])
+
+                else: # not DND, ie. SND
+
+                    self.DND = False
+
+                    # Insert primary xpoint into the LCFS
+                    insert_point_to_LCFS(self.xpt[0][0],self.xpt[0][1])
+
+            if not self.DND: # If the plasma is not DND, check if it is LSND or USND
+
+                # Check xpoint Z position to determine if USND or LSND
+
+                if self.xpt[0][1] < 0.0: # LSND
+
+                    self.LSND = True
+                    self.USND = False
+
+                else: # USND
+
+                    self.LSND = False
+                    self.USND = True
+
+        else: # limited
+
+            self.DND = False
+            self.LSND = False
+            self.USND = False
+
+        # Make a Shapely LineString of the LCFS. This will be used
+        # to find the squareness of the plasma.
+        lcfs = LineString(zip(self.Rlcfs,self.Zlcfs))
+
+        # P2 will be the upper midplane LCFS extrema
+
+        ind_P2 = np.argmax(self.Zlcfs)
+        self.R_P2 = self.Rlcfs[ind_P2]
+        self.Z_P2 = self.Zlcfs[ind_P2]
+
+        # P4 will be the lower midplane LCFS extrema
+
+        ind_P4 = np.argmin(self.Zlcfs)
+        self.R_P4 = self.Rlcfs[ind_P4]
+        self.Z_P4 = self.Zlcfs[ind_P4]
+
+        # Next, we determine 4 more points, P5,6,7,8 that are used to
+        # defined the squareness of the plasma for the upper outer quadrant.
+
+        # Get a = Z difference between P1 and P2
+        a = self.Z_P2 - self.Z_P1
+
+        # Get b = R difference between P1 and P2
+        b = self.R_P1 - self.R_P2
+
+        # Get the elipse intersection point, P5
+        self.R_P5 = self.R_P2 + b*np.sqrt(0.5)
+        self.Z_P5 = self.Z_P1 + a*np.sqrt(0.5)
+
+        # Define P6, a point at the R of P1 and the Z of P2
+        self.R_P6 = self.R_P1
+        self.Z_P6 = self.Z_P2
+
+        # Define P7, a point at the R of P2 and the Z of P1
+        self.R_P7 = self.R_P2
+        self.Z_P7 = self.Z_P1
+
+        # Get P8, the intersection point of the LCFS and a line joining P6 to P7
+        line = LineString(zip([self.R_P6,self.R_P7],[self.Z_P6,self.Z_P7]))
+        intersection_point = intersection(lcfs,line)
+        
+        self.R_P8 = intersection_point.x
+        self.Z_P8 = intersection_point.y
+
+        # Next, we determine 4 more points, P9,10,11,12 that are used to
+        # defined the squareness of the plasma for the lower outer quadrant.
+        # Get a = Z difference between P1 and P4
+        a = self.Z_P1 - self.Z_P4
+
+        # Get b = R difference between P1 and P4
+        b = self.R_P1 - self.R_P4
+
+        # Get the elipse intersection point, P9
+        self.R_P9 = self.R_P4 + b*np.sqrt(0.5)
+        self.Z_P9 = self.Z_P1 - a*np.sqrt(0.5)
+
+        # Define P10, a point at the R of P1 and the Z of P4
+        self.R_P10 = self.R_P1
+        self.Z_P10 = self.Z_P4
+
+        # Define P11, a point at the R of P4 and the Z of P1
+        self.R_P11 = self.R_P4
+        self.Z_P11 = self.Z_P1
+
+        # Get P12, the intersection point of the LCFS and a line joining P10 to P11
+        line = LineString(zip([self.R_P10,self.R_P11],[self.Z_P10,self.Z_P11]))
+        intersection_point = intersection(lcfs,line)
+
+        self.R_P12 = intersection_point.x
+        self.Z_P12 = intersection_point.y
+
+        # Next, we determine 4 more points, P13,14,15,16 that are used to
+        # defined the squareness of the plasma for the upper inner quadrant.
+        # Get a = Z difference between P2 and P3
+        a = self.Z_P2 - self.Z_P3
+
+        # Get b = R difference between P2 and P3
+        b = self.R_P2 - self.R_P3 ##
+
+        # Get the elipse intersection point, P13
+        self.R_P13 = self.R_P2 - b*np.sqrt(0.5)
+        self.Z_P13 = self.Z_P3 + a*np.sqrt(0.5)
+
+        # Define P14, a point at the R of P3 and the Z of P2
+        self.R_P14 = self.R_P3
+        self.Z_P14 = self.Z_P2
+
+        # Define P15, a point at the R of P2 and the Z of P3
+        self.R_P15 = self.R_P2
+        self.Z_P15 = self.Z_P3
+
+        # Get P16, the intersection point of the LCFS and a line joining P14 to P15
+        line = LineString(zip([self.R_P14,self.R_P15],[self.Z_P14,self.Z_P15]))
+        intersection_point = intersection(lcfs,line)
+
+        self.R_P16 = intersection_point.x
+        self.Z_P16 = intersection_point.y
+
+        # Next, we determine 4 more points, P17,18,19,20 that are used to
+        # defined the squareness of the plasma for the lower inner quadrant.
+        # Get a = Z difference between P4 and P3
+        a = self.Z_P3 - self.Z_P4
+
+        # Get b = R difference between P4 and P3
+        b = self.R_P4 - self.R_P3 ##
+
+        # Get the elipse intersection point, P17
+        self.R_P17 = self.R_P4 - b*np.sqrt(0.5)
+        self.Z_P17 = self.Z_P3 - a*np.sqrt(0.5)
+
+        # Define P18, a point at the R of P3 and the Z of P4
+        self.R_P18 = self.R_P3
+        self.Z_P18 = self.Z_P4
+
+        # Define P19, a point at the R of P4 and the Z of P3
+        self.R_P19 = self.R_P4
+        self.Z_P19 = self.Z_P3
+
+        # Get P20, the intersection point of the LCFS and a line joining P18 to P19
+        line = LineString(zip([self.R_P18,self.R_P19],[self.Z_P18,self.Z_P19]))
+        intersection_point = intersection(lcfs,line)
+
+        self.R_P20 = intersection_point.x
+        self.Z_P20 = intersection_point.y
+
+        # Plot these key geometry points - useful for debugging
+        '''fig, ax = plt.subplots()
+        ax.plot(self.Rlcfs,self.Zlcfs,'r')
+        ax.scatter(self.R_P1,self.Z_P1,marker='x',label='P1')
+        ax.scatter(self.R_P2,self.Z_P2,marker='x',label='P2')
+        ax.scatter(self.R_P3,self.Z_P3,marker='x',label='P3')
+        ax.scatter(self.R_P4,self.Z_P4,marker='x',label='P4')
+        ax.scatter(self.R_P5,self.Z_P5,marker='x',label='P5')
+        ax.scatter(self.R_P6,self.Z_P6,marker='x',label='P6')
+        ax.scatter(self.R_P7,self.Z_P7,marker='x',label='P7')
+        ax.scatter(self.R_P8,self.Z_P8,marker='x',label='P8')
+        ax.scatter(self.R_P9,self.Z_P9,marker='x',label='P9')
+        ax.scatter(self.R_P10,self.Z_P10,marker='x',label='P10')
+        ax.scatter(self.R_P11,self.Z_P11,marker='x',label='P11')
+        ax.scatter(self.R_P12,self.Z_P12,marker='x',label='P12')
+        ax.scatter(self.R_P11,self.Z_P11,marker='x',label='P11')
+        ax.scatter(self.R_P12,self.Z_P12,marker='x',label='P12')
+        ax.scatter(self.R_P13,self.Z_P13,marker='x',label='P13')
+        ax.scatter(self.R_P14,self.Z_P14,marker='x',label='P14')
+        ax.scatter(self.R_P15,self.Z_P15,marker='x',label='P15')
+        ax.scatter(self.R_P16,self.Z_P16,marker='x',label='P16')
+        ax.scatter(self.R_P17,self.Z_P17,marker='x',label='P17')
+        ax.scatter(self.R_P18,self.Z_P18,marker='x',label='P18')
+        ax.scatter(self.R_P19,self.Z_P19,marker='x',label='P19')
+        ax.scatter(self.R_P20,self.Z_P20,marker='x',label='P20')
+        ax.plot([self.R_P6,self.R_P7],[self.Z_P6,self.Z_P7],'k')
+        ax.plot([self.R_P10,self.R_P11],[self.Z_P10,self.Z_P11],'k')
+        ax.plot([self.R_P14,self.R_P15],[self.Z_P14,self.Z_P15],'k')
+        ax.plot([self.R_P18,self.R_P19],[self.Z_P18,self.Z_P19],'k')
+        ax.scatter(self.Rgeometric(),self.Zgeometric(),color='tab:orange',marker='+',label=r'$(R_{geo},Z_{geo})$')
+        ax.scatter(self.Rcentroid(),self.Zcentroid(),color='b',marker='+',label=r'$(R_{cent},Z_{cent})$')
+        ax.scatter(self.Rmagnetic(),self.Zmagnetic(),color='g',marker='+',label=r'$(R_{mag},Z_{mag})$')
+        ax.set_aspect('equal')
+        ax.set_xlabel('R (m)')
+        ax.set_ylabel('Z (m)')
+        #ax.legend(loc='lower right')
+        plt.show()
+        '''
+
     def magneticAxis(self):
         """Returns the location of the magnetic axis as a list [R,Z,psi]"""
-        opt, xpt = critical.find_critical(self.R, self.Z, self.psi())
-        return opt[0]
+
+        return self.opt[0]
 
     def Rmagnetic(self):
         """The major radius R of magnetic major radius"""
@@ -755,341 +1360,301 @@ class Equilibrium:
         """The height Z of magnetic axis"""
         return self.magneticAxis()[1]
 
-    def geometricAxis(self, npoints=360):
-        """Locates geometric axis, returning [R,Z]. First locates the
-        extrema points in R of the LCFS, wherein P3 is at the IMP and
-        P1 is at the OMP.
+    def geometricAxis(self):
+        """Returns the geometric axis of the plasma [Rgeo,Zgeo]
+        
+        Definitions for plasma boundary shape characterisation taken from:
 
-        R0 = R(P3) + 0.5*(R(P1)-R(P3))
-        z0 = 0.5*(Z(P1)+Z(P3))
+        Luce, T.C., 2013. An analytic functional form for characterization and generation
+        of axisymmetric plasma boundaries. Plasma physics and controlled fusion, 55(9), p.095009.
+
+        DOI 10.1088/0741-3335/55/9/095009
         """
 
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
+        Rgeo = 0.5*(self.R_P3 + self.R_P1)
+        Zgeo = 0.5*(self.Z_P4 + self.Z_P2)
 
-        Rlcfs = np.array([i[0] for i in separatrix])
-        Zlcfs = np.array([i[1] for i in separatrix])
+        return [Rgeo, Zgeo]
 
-        ind_P1 = np.argmax(Rlcfs)
-        ind_P3 = np.argmin(Rlcfs)
+    def Rgeometric(self):
+        """Locates major radius R of the geometric axis."""
 
-        P1 = np.array([Rlcfs[ind_P1], Zlcfs[ind_P1]])
-        P3 = np.array([Rlcfs[ind_P3], Zlcfs[ind_P3]])
+        Rgeo = 0.5*(self.R_P3 + self.R_P1)
 
-        R0 = P3[0] + 0.5 * (P1[0] - P3[0])
-        z0 = 0.5 * (P1[1] + P3[1])
+        return Rgeo
 
-        C = np.array([R0, z0])
+    def Zgeometric(self):
+        """Locates the height Z of the geometric axis."""
 
-        return C
+        Zgeo = 0.5*(self.Z_P4 + self.Z_P2)
 
-    def Rgeometric(self, npoints=360):
-        """Locates major radius R of the geometric major radius."""
-        return self.geometricAxis(npoints=npoints)[0]
+        return Zgeo
 
-    def Zgeometric(self, npoints=360):
-        """Locates the height z of the geometric axis."""
-        return self.geometricAxis(npoints=npoints)[1]
+    def centroidAxis(self):
+        """Returns the geometric centroid of the LCFS [Rcent,Zcent]"""
 
-    def minorRadius(self, npoints=360):
-        """Calculates minor radius of the plasma, a. First locates the
-        extrema points in R of the LCFS, wherein P3 is at the IMP and
-        P1 is at the OMP.
+        # Get a list of [r,z] points of the LCFS
+        points = [[r,z] for r,z in zip(self.Rlcfs,self.Zlcfs)]
 
-        a = 0.5*(R(P1) - R(P3))
-        """
+        # Make a polygon of the LCFS
+        P = Polygon(points)
 
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
+        # Find the centroid of this polygon
+        centroid = P.centroid
 
-        Rlcfs = np.array([i[0] for i in separatrix])
+        return [centroid.x,centroid.y]
 
-        R_P1 = np.max(Rlcfs)
-        R_P3 = np.min(Rlcfs)
+    def Rcentroid(self):
+        """Locates najor radius R of the LCFS centroid."""
+        return self.centroidAxis()[0]
 
-        return 0.5 * (R_P1 - R_P3)
+    def Zcentroid(self):
+        """Locates height z of the LCFS centroid."""
+        return self.centroidAxis()[1]
 
-    def aspectRatio(self, npoints=360):
-        """Calculates the plasma aspect ratio.
+    def minorRadius(self):
+        """Calculates minor radius of the plasma, a."""
+
+        a = 0.5*(self.R_P1 - self.R_P3)
+
+        return a
+
+    def aspectRatio(self):
+        """Calculates the plasma aspect ratio, A.
 
         A = R0/a where R0 = major radius, a = minor radius.
         """
-        return self.Rgeometric(npoints=npoints) / self.minorRadius(npoints=npoints)
 
-    def inverseAspectRatio(self, npoints=360):
-        """Calculates inverse of the plasma aspect ratio.
+        A = self.Rgeometric() / self.minorRadius()
+
+        return A
+
+    def inverseAspectRatio(self):
+        """Calculates inverse of the aspect ratio.
 
         epsilon = 1/A
         A = R0/a where R0 = major radius, a = minor radius.
         """
-        return self.minorRadius(npoints=npoints) / self.Rgeometric(npoints=npoints)
 
-    def elongation(self, npoints=360):
-        """Calculates the elongation, kappa, of the plasma. A large number
-        of points should be supplied such that any primary xpoint(s) on
-        the LCFS are captured. The R,Z of the primary x-point is NOT
-        itself included in the R,Z of the LCFS as the plasma may be limited.
-        P2 is the point at the upper extent of the plasma, and P4 is the point
-        at the lower extent of the plasma.
+        epsilon = 1.0/self.aspectRatio()
 
-        kappa = (Z(P2) - Z(P4))/a
+        return epsilon
+
+    def elongation(self):
+        """Calculates plasma elongation, kappa."""
+
+        kappa = (self.Z_P2 - self.Z_P4) / (2. * self.minorRadius())
+
+        return kappa
+
+    def elongationUpper(self):
+        """Calculates the upper elongation, kappa_u, of the plasma."""
+
+        kappa_u = (self.Z_P2 - self.Z_P1) / self.minorRadius()
+
+        return kappa_u
+
+    def elongationLower(self):
+        """Calculates the lower elongation, kappa_l, of the plasma."""
+
+        kappa_l = (self.Z_P1 - self.Z_P4) / self.minorRadius()
+
+        return kappa_l
+
+    def effectiveElongation(self):
+        """Calculates plasma effective elongation, kappa_a, using the plasma volume.
+        
+        kappa_a = V / (2 * pi^2 * Rgeo * aminor)
         """
 
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-
-        Zlcfs = np.array([i[1] for i in separatrix])
-
-        Z_P2 = np.max(Zlcfs)
-        Z_P4 = np.min(Zlcfs)
-
-        a = self.minorRadius(npoints=npoints)
-
-        return 0.5 * (Z_P2 - Z_P4) / a
-
-    def elongationUpper(self, npoints=360):
-        """Calculates the upper elongation, kappa_u, of the plasma. A large number
-        of points should be supplied such that any primary xpoint(s) on
-        the LCFS are captured. The R,Z of the primary x-point is NOT
-        itself included in the R,Z of the LCFS as the plasma may be limited.
-        P2 is the point at the upper extent of the plasma.
-
-        kappa_u = (Z(P2) - z0)/a
-        """
-
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-
-        Zlcfs = np.array([i[1] for i in separatrix])
-
-        Z_P2 = np.max(Zlcfs)
-
-        z0 = self.Zgeometric(npoints=npoints)
-        a = self.minorRadius(npoints=npoints)
-
-        return (Z_P2 - z0) / a
-
-    def elongationLower(self, npoints=360):
-        """Calculates the lower elongation, kappa_l, of the plasma. A large number
-        of points should be supplied such that any primary xpoint(s) on
-        the LCFS are captured. The R,Z of the primary x-point is NOT
-        itself included in the R,Z of the LCFS as the plasma may be limited.
-        P2 is the point at the upper extent of the plasma.
-
-        kappa_u = (z0 - Z(P4))/a
-        """
-
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-
-        Zlcfs = np.array([i[1] for i in separatrix])
-
-        Z_P4 = np.min(Zlcfs)
-
-        z0 = self.Zgeometric(npoints=npoints)
-        a = self.minorRadius(npoints=npoints)
-
-        return (z0 - Z_P4) / a
-
-    def effectiveElongation(self, npoints=360):
-        """Calculates plasma effective elongation using the plasma volume"""
-        return self.plasmaVolume() / (
+        kappa_a = self.plasmaVolume() / (
             2.0
             * np.pi
-            * self.Rgeometric(npoints=npoints)
+            * self.Rgeometric()
             * np.pi
-            * self.minorRadius(npoints=npoints) ** 2
+            * self.minorRadius() ** 2
         )
 
-    def triangularityUpper(self, npoints=360):
-        """Calculates plasma upper triangularity, delta_u.
-        P2 is the point at the upper extent of the plasma.
+        return kappa_a
 
-        tri_u = (R0 - R(P2))/a
+    def triangularityUpper(self):
+        """Calculates the upper triangularity, delta_u, of the plasma.
         """
 
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-        Rlcfs = np.array([i[0] for i in separatrix])
-        Zlcfs = np.array([i[1] for i in separatrix])
+        delta_u = (self.Rgeometric() - self.R_P2) / self.minorRadius()
 
-        ind_P2 = np.argmax(Zlcfs)
+        return delta_u
 
-        R_P2 = Rlcfs[ind_P2]
-
-        R0 = self.Rgeometric(npoints=npoints)
-        a = self.minorRadius(npoints=npoints)
-
-        return (R0 - R_P2) / a
-
-    def triangularityLower(self, npoints=360):
-        """Calculates plasma upper triangularity, delta_u.
-        P4 is the point at the lower extent of the plasma.
-
-        tri_l = (R0 - R(P4))/a
+    def triangularityLower(self):
+        """Calculates the lower triangularity, delta_l, of the plasma.
         """
 
-        # Get points along the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-        Rlcfs = np.array([i[0] for i in separatrix])
-        Zlcfs = np.array([i[1] for i in separatrix])
+        delta_l = (self.Rgeometric() - self.R_P4) / self.minorRadius()
 
-        ind_P4 = np.argmin(Zlcfs)
+        return delta_l
 
-        R_P4 = Rlcfs[ind_P4]
-
-        R0 = self.Rgeometric(npoints=npoints)
-        a = self.minorRadius(npoints=npoints)
-
-        return (R0 - R_P4) / a
-
-    def triangularity(self, npoints=360):
+    def triangularity(self):
         """Calculates plasma triangularity, delta.
 
         Here delta is defined as the average of the upper
         and lower triangularities.
         """
 
-        tri_u = self.triangularityUpper(npoints=npoints)
-        tri_l = self.triangularityLower(npoints=npoints)
+        delta_u = self.triangularityUpper()
+        delta_l = self.triangularityLower()
 
-        return 0.5 * (tri_u + tri_l)
+        delta = 0.5 * (delta_u + delta_l)
 
-    def squarenessUpper(self, npoints=360):
-        """Calculates the upper plasma squareness, zeta.
-        """
+        return delta
 
-        # Get the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-        Rlcfs = np.array([i[0] for i in separatrix])
-        Zlcfs = np.array([i[1] for i in separatrix])
+    def squarenessUpperOuter(self):
+        """Calculates the upper outer quadrant plasma squareness, zeta_uo."""
 
-        Rlcfs = [i[0] for i in separatrix]
-        Zlcfs = [i[1] for i in separatrix]
-        Rlcfs.append(Rlcfs[0])
-        Zlcfs.append(Zlcfs[1])
+        # Calculate distance between P7 and P8
+        dist_P7_8 = np.sqrt((self.R_P7-self.R_P8)**2. + (self.Z_P7-self.Z_P8)**2.)
 
-        # Get the position of the maximum Z of the LCFS, P2.
-        ind_P2 = np.argmax(Zlcfs)
-        R_P2 = Rlcfs[ind_P2]
-        Z_P2 = Zlcfs[ind_P2]
+        # Calculate distance between P7 and P5
+        dist_P7_5 = np.sqrt((self.R_P7-self.R_P5)**2. + (self.Z_P7-self.Z_P5)**2.)
 
-        # Get the position of the maximum R of the LCFS, P1.
-        ind_P1 = np.argmax(Rlcfs)
-        R_P1 = Rlcfs[ind_P1]
-        Z_P1 = Zlcfs[ind_P1]
+        # Calculate distance between P5 and P6
+        dist_P5_6 = np.sqrt((self.R_P5-self.R_P6)**2. + (self.Z_P5-self.Z_P6)**2.)
 
-        # Get a = Z difference between P1 and P2
-        a = Z_P2 - Z_P1
+        zeta_uo = (dist_P7_8 - dist_P7_5) / dist_P5_6
 
-        # Get b = R difference between P1 and P2
-        b = R_P1 - R_P2
+        return zeta_uo
 
-        # Get the elipse intersection point, P5
-        R_P5 = R_P2 + b*np.sqrt(0.5)
-        Z_P5 = Z_P1 + a*np.sqrt(0.5)
+    def squarenessLowerOuter(self):
+        """Calculates the lower outer quadrant plasma squareness, zeta_lo."""
 
-        # Define P6, a point at the R of P1 and the Z of P2
-        R_P6 = R_P1
-        Z_P6 = Z_P2
+        # Calculate distance between P11 and P12
+        dist_P11_12 = np.sqrt((self.R_P11-self.R_P12)**2. + (self.Z_P11-self.Z_P12)**2.)
 
-        # Define P7, a point at the R of P2 and the Z of P1
-        R_P7 = R_P2
-        Z_P7 = Z_P1
+        # Calculate distance between P11 and P9
+        dist_P11_9 = np.sqrt((self.R_P11-self.R_P9)**2. + (self.Z_P11-self.Z_P9)**2.)
 
-        # Get P8, the intersection point of the LCFS and a line joining P6 to P7
-        line = LineString(zip([R_P6,R_P7],[Z_P6,Z_P7]))
-        lcfs = LineString(zip(Rlcfs,Zlcfs))
-        intersection_point = intersection(lcfs,line)
+        # Calculate distance between P9 and P10
+        dist_P9_10 = np.sqrt((self.R_P9-self.R_P10)**2. + (self.Z_P9-self.Z_P10)**2.)
+
+        zeta_lo = (dist_P11_12 - dist_P11_9) / dist_P9_10
+
+        return zeta_lo
+
+    def squarenessUpperInner(self):
+        """Calculates the upper inner quadrant plasma squareness, zeta_ui."""
+
+        # Calculate distance between P15 and P16
+        dist_P15_16 = np.sqrt((self.R_P15-self.R_P16)**2. + (self.Z_P15-self.Z_P16)**2.)
+
+        # Calculate distance between P15 and P13
+        dist_P15_13 = np.sqrt((self.R_P15-self.R_P13)**2. + (self.Z_P15-self.Z_P13)**2.)
+
+        # Calculate distance between P13 and P14
+        dist_P13_14 = np.sqrt((self.R_P13-self.R_P14)**2. + (self.Z_P13-self.Z_P14)**2.)
+
+        zeta_ui = (dist_P15_16 - dist_P15_13) / dist_P13_14
+
+        return zeta_ui
+
+    def squarenessLowerInner(self):
+        """Calculates the lower inner quadrant plasma squareness, zeta_li."""
+
+        # Calculate distance between P19 and P20
+        dist_P19_20= np.sqrt((self.R_P19-self.R_P20)**2. + (self.Z_P19-self.Z_P20)**2.)
+
+        # Calculate distance between P19 and P17
+        dist_P19_17 = np.sqrt((self.R_P19-self.R_P17)**2. + (self.Z_P19-self.Z_P17)**2.)
+
+        # Calculate distance between P17 and P18
+        dist_P17_18 = np.sqrt((self.R_P17-self.R_P18)**2. + (self.Z_P17-self.Z_P18)**2.)
+
+        zeta_li = (dist_P19_20 - dist_P19_17) / dist_P17_18
+        return zeta_li
+
+    def calc_miller_params(self,show=False):
+        """ Fits a shape parameterised by the
+        Miller eXtended Harmonic (MXH) model to the LCFS taken from
         
-        R_P8 = intersection_point.x
-        Z_P8 = intersection_point.y
+        Arbon, R., Candy, J. and Belli, E.A., 2020. Rapidly-convergent
+        flux-surface shape parameterization. Plasma Physics and Controlled Fusion, 63(1), p.012001.
 
-        # Calculate distance between P7 and P8
-        dist_P78 = np.sqrt((R_P7-R_P8)**2. + (Z_P7-Z_P8)**2.)
+        DOI 10.1088/1361-6587/abc63b.
 
-        # Calculate distance between P7 and P5
-        dist_P75 = np.sqrt((R_P7-R_P5)**2. + (Z_P7-Z_P5)**2.)
-
-        # Calculate distance between P5 and P6
-        dist_P56 = np.sqrt((R_P5-R_P6)**2. + (Z_P5-Z_P6)**2.)
-
-        return (dist_P78 - dist_P75) / dist_P56
-
-    def squarenessLower(self, npoints=360):
-        """Calculates the lower plasma squareness, zeta.
+        Adapated from original code provided by Michail Anastopoulos.
         """
 
-        # Get the LCFS
-        separatrix = self.separatrix(npoints=npoints)  # Array [:,2]
-        Rlcfs = np.array([i[0] for i in separatrix])
-        Zlcfs = np.array([i[1] for i in separatrix])
+        # R of the boundary from the Miller representation
+        def R_MXH(c,R0,rho0,th):
+            th_mxh = th + c[0] + c[1]*np.cos(th) + c[2]*np.sin(th) + c[3]*np.cos(2*th) + c[4]*np.sin(2*th) \
+            + c[5]*np.cos(3*th) + c[6]*np.sin(3*th) + c[7]*np.cos(4*th) + c[8]*np.sin(4*th)	
+            R = R0 + rho0 * np.cos( th_mxh )
+            return R
+        
+        # Residual in R from fitting the Miller boundary to the LCFS
+        def residual(c,Rb,R0,rho0,th):
+            return Rb - R_MXH(c,R0,rho0,th)
 
-        Rlcfs = [i[0] for i in separatrix]
-        Zlcfs = [i[1] for i in separatrix]
-        Rlcfs.append(Rlcfs[0])
-        Zlcfs.append(Zlcfs[1])
+        # Number of points constituting the LCFS
+        nbndry = len(self.Rlcfs)
 
-        # Get the position of the minimum Z of the LCFS, P3.
-        ind_P3 = np.argmin(Zlcfs)
-        R_P3 = Rlcfs[ind_P3]
-        Z_P3 = Zlcfs[ind_P3]
+        # Obtain the major radius of the geometric axis
+        R0 = self.Rgeometric()
 
-        # Get the position of the maximum R of the LCFS, P1.
-        ind_P1 = np.argmax(Rlcfs)
-        R_P1 = Rlcfs[ind_P1]
-        Z_P1 = Zlcfs[ind_P1]
+        # Obtain the height of the geometric axis
+        Z0 = self.Zgeometric()
+        
+        # Obtain the elongation
+        kappa = self.elongation()
 
-        # Get a = Z difference between P1 and P3
-        a = Z_P3 - Z_P1
+        # Obtain the minor radius
+        rho0 = self.minorRadius()
 
-        # Get b = R difference between P1 and P3
-        b = R_P1 - R_P3
+        # Calculate the poloidal angle of each boundary point
+        th = []
+        for i in range(nbndry):
+            if (self.Zlcfs[i]-Z0)/(kappa*rho0)>1.0:
+                th.append(np.arcsin(1.0))
+            elif (self.Zlcfs[i]-Z0)/(kappa*rho0)<-1.0:
+                th.append(np.arcsin(-1.0))
+            else:
+                th.append(np.arcsin((self.Zlcfs[i]-Z0)/(kappa*rho0)))
+        th = np.array(th)
+        for i in range(1,nbndry):
+            if th[i]<th[i-1]:
+                th[i] = np.pi-th[i]
+            if th[i]<th[i-1]:
+                th[i] = 3*np.pi-th[i]
+        th -= np.pi 
+        th = -th
 
-        # Get the elipse intersection point, P5
-        R_P5 = R_P3 + b*np.sqrt(0.5)
-        Z_P5 = Z_P1 + a*np.sqrt(0.5)
+        # Fit a Miller parameterised boundary to the LCFS
+        c0 = np.zeros([9])
+        c, flags = leastsq(residual, c0, args=(self.Rlcfs,R0,rho0,th))
 
-        # Define P6, a point at the R of P1 and the Z of P3
-        R_P6 = R_P1
-        Z_P6 = Z_P3
+        # Record these miller parameters
+        self.miller_params = c
 
-        # Define P7, a point at the R of P3 and the Z of P1
-        R_P7 = R_P3
-        Z_P7 = Z_P1
+        # Plot this Miller boundary
+        if show:
 
-        # Get P8, the intersection point of the LCFS and a line joining P6 to P7
-        line = LineString(zip([R_P6,R_P7],[Z_P6,Z_P7]))
-        lcfs = LineString(zip(Rlcfs,Zlcfs))
-        intersection_point = intersection(lcfs,line)
+            x = np.zeros([nbndry])
+            z = np.zeros([nbndry])
+            th = np.linspace(-np.pi,np.pi,nbndry)
+            th_mxh = th + c[0] + c[1]*np.cos(th) + c[2]*np.sin(th) + c[3]*np.cos(2*th) + c[4]*np.sin(2*th) + \
+            c[5]*np.cos(3*th) + c[6]*np.sin(3*th) + c[7]*np.cos(4*th) + c[8]*np.sin(4*th)	
+            for i in range(nbndry):
+                x[i] = R0 + rho0 * np.cos( th_mxh[i] )
+                z[i] = Z0 + kappa * rho0 * np.sin(th[i])
 
-        R_P8 = intersection_point.x
-        Z_P8 = intersection_point.y
+            fig, ax = plt.subplots()
+            ax.plot(x,z,label='MXH')
+            ax.plot(self.Rlcfs,self.Zlcfs,'r',label='LCFS')
+            ax.set_aspect('equal')
+            ax.set_xlabel('R (m)')
+            ax.set_ylabel('Z (m)')
+            ax.legend()
+            plt.show()
 
-        # Calculate distance between P7 and P8
-        dist_P78 = np.sqrt((R_P7-R_P8)**2. + (Z_P7-Z_P8)**2.)
-
-        # Calculate distance between P7 and P5
-        dist_P75 = np.sqrt((R_P7-R_P5)**2. + (Z_P7-Z_P5)**2.)
-
-        # Calculate distance between P5 and P6
-        dist_P56 = np.sqrt((R_P5-R_P6)**2. + (Z_P5-Z_P6)**2.)
-
-        return (dist_P78 - dist_P75) / dist_P56
-
-    def squareness(self, npoints=360):
-        """Calculates plasma squareness, zeta.
-
-        Here zeta is defined as the average of the upper
-        and lower squarenesses.
-        """
-
-        sq_u = self.squarenessUpper(npoints=npoints)
-        sq_l = self.squarenessLower(npoints=npoints)
-
-        return 0.5 * (sq_u + sq_l)
-
-    def flux_surface_averaged_Bpol2(self, psiN=0.995, npoints=360):
+    def flux_surface_averaged_Bpol2(self, psiN=1.0, npoints=1000):
         """
         Calculates the flux surface averaged value of the square of the poloidal field.
         """
@@ -1097,11 +1662,14 @@ class Equilibrium:
         # Get R, Z points of the flux surface
         Rsurf, Zsurf = self.psi_surfRZ(psiN=psiN,npoints=npoints)
 
+        self.Rsurf = Rsurf
+        self.Zsurf = Zsurf
+
         # Get the poloidal field
         Bpol_surf = self.Bpol(Rsurf,Zsurf)
 
         # Get the square of the poloidal field
-        Bpol_surf2 = self.Bpol(Rsurf,Zsurf)**2.0
+        Bpol_surf2 = Bpol_surf**2.0
 
         # Get dl along the surface
         dl = np.sqrt(np.diff(Rsurf)**2.0 + np.diff(Zsurf)**2.0)
@@ -1111,9 +1679,9 @@ class Equilibrium:
         l = np.cumsum(dl)
 
         # Calculate the flux surface averaged quantity
-        return np.trapz(l,Bpol_surf2 * Bpol_surf) / np.trapz(l, np.ones(np.size(l)) * Bpol_surf)
+        return np.trapz(x=l, y=Bpol_surf2 * Bpol_surf) / np.trapz(x=l, y=np.ones(np.size(l)) * Bpol_surf)
 
-    def shafranovShift(self, npoints=360):
+    def shafranovShift(self):
         """Calculates the plasma shafranov shift
         [delta_shafR,delta_shafZ] where
 
@@ -1129,8 +1697,11 @@ class Equilibrium:
 
         return np.array([Rmag - Rgeo, Zmag - z0])
 
-    def internalInductance1(self, npoints=360):
-        """Calculates li1 plasma internal inductance"""
+    def internalInductance1(self):
+        """Calculates li1 plasma internal inductance.
+        
+        li1 = ( (1 + kappa^2) / (2 * kappa_a) ) * ( (2 * V * <Bpol^2>) / ( (mu0 Ip)^2 * Rgeo) )
+        """
 
         R = self.R
         Z = self.Z
@@ -1148,7 +1719,10 @@ class Equilibrium:
         return ((1.+kappa*kappa)/(2.*kappa_a)) * (2.0*vol*volume_averaged_Bp2) / ((mu0*Ip)**2.0 * R_geo)
 
     def internalInductance2(self):
-        """Calculates li2 plasma internal inductance"""
+        """Calculates li2 plasma internal inductance.
+        
+        li2 = (2 * V * <Bpol^2>) / ( (mu0 Ip)^2 * Rmag)
+        """
 
         R = self.R
         Z = self.Z
@@ -1163,8 +1737,11 @@ class Equilibrium:
 
         return (2.0*vol*volume_averaged_Bp2) / ((mu0*Ip)**2.0 * R_mag)
 
-    def internalInductance3(self, npoints=360):
-        """Calculates li3 plasma internal inductance"""
+    def internalInductance3(self):
+        """Calculates li3 plasma internal inductance.
+        
+        li3 = (2 * V * <Bpol^2>) / ( (mu0 Ip)^2 * Rgeo)
+        """
 
         R = self.R
         Z = self.Z
@@ -1179,50 +1756,49 @@ class Equilibrium:
 
         return (2.0*vol*volume_averaged_Bp2) / ((mu0*Ip)**2.0 * R_geo)
 
-    def internalInductance(self, npoints=360):
-        """Calculates plasma internal inductance li
+    def internalInductance(self):
+        """Calculates the full plasma internal inductance Li
 
-        li = 4/(mu0*R0*Ip^2) * int(2piR*(Bp^2/2mu0)*dR*dZ)
-           = 2/(mu0^2*R0*Ip^2)*int(2piR*Bp^2*dR*dZ)
+        (1/2) Li * Ip^2 = int( (Bpol^2 / (2mu0) ) dV )
         """
 
-        R = self.R
-        Z = self.Z
         # Produce array of Bpol in (R,Z)
-        B_polvals_2 = self.Br(R, Z) ** 2 + self.Bz(R, Z) ** 2
+        B_polvals_2 = self.Bpol(self.R, self.Z) ** 2
 
-        dV = 2.0 * np.pi * R * self.dR * self.dZ
+        # Volume integrated Bpol^2
+        Bpol2_integral = self.calc_volume_integrated(B_polvals_2)
 
-        if self.mask is not None:  # Only include points in the core
-            dV *= self.mask
-
+        # Get the plasma current
         Ip = self.plasmaCurrent()
-        R_geo = self.Rgeometric(npoints=npoints)
 
-        integral = romb(romb(B_polvals_2 * dV))
-        return 2 * integral / (mu0 * mu0 * R_geo * Ip * Ip)
+        return Bpol2_integral / (mu0 * Ip * Ip)
 
     def poloidalBeta(self):
-        """Return the poloidal beta"""
+        """Return the poloidal beta.
+        
+        betaP = 2 * mu0 * <p> / <<Bpol^2>>
+        """
 
         # Normalised psi
-        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiN()
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
 
         volume_averaged_pressure = self.calc_volume_averaged(pressure)
-        volume_averaged_magnetic_pressure = self.calc_volume_averaged(self.Bpol(self.R,self.Z)**2.0) / (2.0 * mu0)
+        
+        line_averaged_Bpol2_lcfs = self.flux_surface_averaged_Bpol2(psiN=1.0)
 
-        return volume_averaged_pressure / volume_averaged_magnetic_pressure
+        return (2.0 * mu0 * volume_averaged_pressure) / line_averaged_Bpol2_lcfs
 
     def poloidalBeta2(self):
-        """Return the poloidal beta
-        betap2 = (4 * vol * volume_averaged(p)) / (mu0 * Ip^2 * Raxis)
+        """Return the poloidal beta.
+
+        betaP2 = (4 * V * <p>) / (mu0 * Ip^2 * Raxis)
         """
 
         # Normalised psi
-        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiN()
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
@@ -1232,12 +1808,13 @@ class Equilibrium:
         return (4 * self.plasmaVolume() * volume_averaged_pressure) / (mu0 * self.plasmaCurrent()**2.0 * self.Rmagnetic())
 
     def poloidalBeta3(self):
-        """Return the poloidal beta
-        betap3 = (4 * vol * volume_averaged(p)) / (mu0 * Ip^2 * Rgeo)
+        """Return the poloidal beta.
+
+        betaP3 = (4 * V * <p>) / (mu0 * Ip^2 * Rgeo)
         """
 
         # Normalised psi
-        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiN()
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
@@ -1247,10 +1824,10 @@ class Equilibrium:
         return (4 * self.plasmaVolume() * volume_averaged_pressure) / (mu0 * self.plasmaCurrent()**2.0 * self.Rgeometric())
 
     def toroidalBeta(self):
-        """Calculate plasma toroidal beta."""
+        """Calculate plasma toroidal beta (not a percentage)."""
 
         # Normalised psi
-        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiN()
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
@@ -1268,7 +1845,7 @@ class Equilibrium:
         return 1.0 / ((1.0 / self.poloidalBeta()) + (1.0 / self.toroidalBeta()))
 
     def betaN(self):
-        """Calculate normalised plasma beta"""
+        """Calculate normalised plasma beta (not a percentage)."""
 
         # Toroidal field at geometric axis
         geo = self.geometricAxis()
@@ -1284,7 +1861,7 @@ class Equilibrium:
         """Calculate volume averaged pressure, Pa."""
 
         # Normalised psi
-        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiN()
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
@@ -1294,10 +1871,12 @@ class Equilibrium:
     def w_th(self):
         """
         Stored thermal energy in plasma, J.
+
+        Wth = 3/2 * int(p dV)
         """
 
         # Normalised psi
-        psi_norm = (self.psi() - self.psi_axis) / (self.psi_bndry - self.psi_axis)
+        psi_norm = self.psiN()
 
         # Plasma pressure
         pressure = self.pressure(psi_norm)
@@ -1345,6 +1924,53 @@ class Equilibrium:
         
         return volume_integrated_field / self.plasmaVolume()
 
+    def currentAxis(self):
+        """
+        Returns the location of the current centre as a list [R,Z]
+        
+        Rcur = 
+        """
+
+        Ip = romb(romb(self.Jtor)) * self.dR * self.dZ
+
+        Rcur = (1./Ip) * romb(romb(self.R * self.Jtor)) * self.dR * self.dZ
+        Zcur = (1./Ip) * romb(romb(self.Z * self.Jtor)) * self.dR * self.dZ
+
+        return [Rcur,Zcur]
+
+    def Rcurrent(self):
+        """Returns the R coordinate of the current centre"""
+
+        Rcur, _ = self.currentAxis()
+        return Rcur
+
+    def Zcurrent(self):
+        """Returns the Z coordinate of the current centre"""
+
+        _, Zcur = self.currentAxis()
+        return Zcur
+
+    def decay_index(self):
+        """
+        Calculate the decay index n = -(R/Bz) * (dBz/dR).
+        This is calculated on the magnetic axis.
+        """
+
+        R = self.R
+        Z = self.Z
+        Bz = self.Bz(R,Z)
+
+        Bz_func = interpolate.RectBivariateSpline(
+            self.R[:, 0], self.Z[0, :], Bz
+        )
+
+        Rmag = self.Rmagnetic()
+        Zmag = self.Zmagnetic()
+        Bz_mag = self.Bz(Rmag,Zmag)
+        dBz_dR_mag = Bz_func(Rmag, Zmag, dx=1, grid=False)
+
+        return -(Rmag/Bz_mag) * dBz_dR_mag
+
 def refine(eq, nx=None, ny=None):
     """
     Double grid resolution, returning a new equilibrium
@@ -1384,7 +2010,6 @@ def refine(eq, nx=None, ny=None):
         result.control = eq.control
 
     return result
-
 
 def coarsen(eq):
     """

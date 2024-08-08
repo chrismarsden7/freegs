@@ -81,8 +81,8 @@ eq2 = freegs.Equilibrium(tokamak=tokamak2,
 #########################################
 # Plasma profiles
 
-profiles2 = freegs.jtor.BetapIpConstrainedSplineProfiles(eq,
-                                        3.214806e-02, # Poloidal beta
+profiles2 = freegs.jtor.BetapIpConstrainedSplineProfiles(eq2,
+                                        3.214052e-02, # Poloidal beta
                                         2e5, # Plasma current [Amps]
                                         1.0, # Raxis [m],
                                         psi_n_data, # Spline data for normalised psi

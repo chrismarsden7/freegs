@@ -163,7 +163,7 @@ class FilamentCoil(Coil):
     filaments, with each filament acting as a point source
     of current.
 
-    Note: Filaments are wired in parallel, so a the current
+    Note: Filaments are wired in parallel, so the current
     through a single turn is shared between the filaments.
 
     public members
@@ -353,15 +353,16 @@ class FilamentCoil(Coil):
         if axis is None:
             fig = plt.figure()
             axis = fig.add_subplot(111)
+            axis.set_aspect('equal')
 
         r = [r for r, z in self.shape]
         z = [z for r, z in self.shape]
-        axis.fill(r, z, color="gray")
-        axis.plot(r, z, color="black")
+        axis.fill(r, z, color='gray')
+        axis.plot(r, z, color='black')
 
         r = [r for r, z in self.points]
         z = [z for r, z in self.points]
-        axis.plot(r, z, "kx")
+        #axis.plot(r, z, "kx")
 
         # Quadrature points
         # rquad = [r for r,z,w in self._points]

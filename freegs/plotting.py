@@ -107,7 +107,7 @@ def plotEquilibrium(eq, axis=None, show=True, oxpoints=True, wall=True, plot_sen
             axis.plot(r, z, "go")
 
         if xpt:
-            psi_bndry = eq.psi_bndry  # xpt[0][2]
+            psi_bndry = eq.psi_bndry
             axis.contour(eq.R, eq.Z, psi, levels=[psi_bndry], colors="r")
 
             # Add legend
