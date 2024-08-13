@@ -286,6 +286,80 @@ class Equilibrium:
 
             return np.asarray(vals)
 
+    def plasmaArea(self,psiN=None):
+        """
+        Calculate the poloidal cross sectional area of the plasma in m^2 that is 
+        enclosed within the flux surface given by psiN.
+
+        psiN should be between 0 and 1.
+        """
+
+        # Area elements
+        dA_not_masked = np.ones(np.shape(self.R)) * self.dR * self.dZ
+
+        # Get psi on the grid
+        psi = self.psi()
+
+        # Get the opoint and primary xpoint psi
+        opt, xpt = critical.find_critical(self.R, self.Z, psi)
+
+        # If psiN is not specified, use the primary separatrix
+        if psiN is None:
+
+            psiN = 1.0
+
+        if np.ndim(psiN) == 0:
+
+            if psiN == 0.0:
+
+                return 0.0
+
+            else:
+
+                # Get the psi of the specified psiN
+                psi_target = self.psi_psiN(psiN)
+
+                # Mask the core up to the flux surface of the specified psiN
+                mask = critical.core_mask(
+                    self.R, self.Z, psi, opt, xpt, psi_target
+                )
+
+                # Only include points in the mask
+                dA = dA_not_masked * mask
+
+                # Integrate volume in 2D
+                return romb(romb(dA))
+
+        else:
+
+            vals = []
+
+            for pn in psiN:
+
+                if pn == 0.0:
+
+                    vals.append(0.0)
+
+                else:
+
+                    # Get the psi of the specified psiN
+                    psi_target = self.psi_psiN(pn)
+
+                    # Mask the core up to the flux surface of the specified psiN
+                    mask = critical.core_mask(
+                        self.R, self.Z, psi, opt, xpt, psi_target
+                    )
+
+                    # Only include points in the mask
+                    dA = dA_not_masked * mask
+
+                    # Integrate volume in 2D
+                    val = romb(romb(dA))
+
+                    vals.append(val)
+
+            return np.asarray(vals)
+
     def dV_dpsiN(self,psiN=None):
         """Calculate dV/dpsiN"""
 
@@ -344,6 +418,25 @@ class Equilibrium:
         Bz = (1/R) dpsi/dR
         """
         return self.psi_func(R, Z, dx=1, grid=False) / R
+
+    def plasmaBtor(self, R, Z):
+        """
+        Toroidla magnetic field due to plasma
+        Btor = fpol / R
+        """
+        # Normalised psi
+        psi_norm = self.psiNRZ(R,Z)
+
+        # Get f = R * Btor in the core. May be invalid outside the core
+        fpol = self.fpol(psi_norm)
+
+        if self.mask is not None:
+            # Get the values of the core mask at the requested R,Z locations
+            # This is 1 in the core, 0 outside
+            mask = self.mask_func(R, Z, grid=False)
+            fpol = fpol * mask
+
+        return fpol / R
 
     def Br(self, R, Z):
         """
@@ -1133,68 +1226,20 @@ class Equilibrium:
         # Get the xpoints
         self.opt, self.xpt = critical.find_critical(self.R, self.Z, self.psi())
 
-        # Check if the plasma is diverted, and if so, what the configuration is
-        if not self.is_limited:
-
-            if len(self.xpt) == 1: # Only 1 xpoint, hence plasma must be SND
-
-                self.DND = False # Cannot be DND if SND
-
-            else: # More than 1 xpoint, can be either SND or DND
-
-                # Check psi of primary and secondary separatrices. If they are
-                # the same, the plasma is DND
-
-                #if self.xpt[0][2] == self.xpt[1][2]: # DND
-                if abs(self.xpt[1][2]-self.xpt[0][2])/self.xpt[0][2] < 1.0e-04: # DND
-
-                    self.DND = True
-                    self.LSND = False
-                    self.USND = False
-
-                    # Insert first and second xpoints into the LCFS
-                    insert_point_to_LCFS(self.xpt[0][0],self.xpt[0][1])
-                    insert_point_to_LCFS(self.xpt[1][0],self.xpt[1][1])
-
-                else: # not DND, ie. SND
-
-                    self.DND = False
-
-                    # Insert primary xpoint into the LCFS
-                    insert_point_to_LCFS(self.xpt[0][0],self.xpt[0][1])
-
-            if not self.DND: # If the plasma is not DND, check if it is LSND or USND
-
-                # Check xpoint Z position to determine if USND or LSND
-
-                if self.xpt[0][1] < 0.0: # LSND
-
-                    self.LSND = True
-                    self.USND = False
-
-                else: # USND
-
-                    self.LSND = False
-                    self.USND = True
-
-        else: # limited
-
-            self.DND = False
-            self.LSND = False
-            self.USND = False
+        # Identify the upper/lower and primary/seconday xpoints as well as the
+        # magnetic configuration of the plasma
+        self.check_mag_con()
 
         # Make a Shapely LineString of the LCFS. This will be used
         # to find the squareness of the plasma.
         lcfs = LineString(zip(self.Rlcfs,self.Zlcfs))
 
         # P2 will be the upper midplane LCFS extrema
-
         ind_P2 = np.argmax(self.Zlcfs)
         self.R_P2 = self.Rlcfs[ind_P2]
         self.Z_P2 = self.Zlcfs[ind_P2]
 
         # P4 will be the lower midplane LCFS extrema
-
         ind_P4 = np.argmin(self.Zlcfs)
         self.R_P4 = self.Rlcfs[ind_P4]
         self.Z_P4 = self.Zlcfs[ind_P4]
@@ -1287,7 +1332,7 @@ class Equilibrium:
         a = self.Z_P3 - self.Z_P4
 
         # Get b = R difference between P4 and P3
-        b = self.R_P4 - self.R_P3 ##
+        b = self.R_P4 - self.R_P3
 
         # Get the elipse intersection point, P17
         self.R_P17 = self.R_P4 - b*np.sqrt(0.5)
@@ -1630,7 +1675,7 @@ class Equilibrium:
         c0 = np.zeros([9])
         c, flags = leastsq(residual, c0, args=(self.Rlcfs,R0,rho0,th))
 
-        # Record these miller parameters
+        # Record these Miller parameters
         self.miller_params = c
 
         # Plot this Miller boundary
@@ -1653,6 +1698,8 @@ class Equilibrium:
             ax.set_ylabel('Z (m)')
             ax.legend()
             plt.show()
+
+        return self.miller_params
 
     def flux_surface_averaged_Bpol2(self, psiN=1.0, npoints=1000):
         """
@@ -1971,6 +2018,113 @@ class Equilibrium:
 
         return -(Rmag/Bz_mag) * dBz_dR_mag
 
+    def bpol_omp(self):
+        """
+        Calculate the poloidal magnetic field at the outer midplane.
+
+        The outer midplane is located at P1
+        """
+
+        return self.Bpol(self.R_P1,self.Z_P1)
+
+    def check_mag_con(self):
+        """
+        Checks what magnetic configuration the plasma is in.
+        This can be:
+
+        limited - a limited plasma touching the wall
+        USND - an upper single-null diverted configuration
+        LSND - a lower single-null diverted configuration
+        DND - a double-null diverted configuration.
+
+        The xpoints are also classified as primary/seconday and upper/lower
+        """
+
+        # Step 1 - Identify the primary and secondary xpoints by checking the
+        # flux at the xpoints
+
+        if self.xpt[0][2] > self.xpt[1][2]:
+            
+            self.xpoint_primary_R = self.xpt[0][0]
+            self.xpoint_primary_Z = self.xpt[0][1]
+            self.xpoint_primary_psi = self.xpt[0][2]
+
+            self.xpoint_secondary_R = self.xpt[1][0]
+            self.xpoint_secondary_Z = self.xpt[1][1]
+            self.xpoint_secondary_psi = self.xpt[1][2]
+
+        else:
+
+            self.xpoint_primary_R = self.xpt[1][0]
+            self.xpoint_primary_Z = self.xpt[1][1]
+            self.xpoint_primary_psi = self.xpt[1][2]
+
+            self.xpoint_secondary_R = self.xpt[0][0]
+            self.xpoint_secondary_Z = self.xpt[0][1]
+            self.xpoint_secondary_psi = self.xpt[0][2]
+
+        # Step 2 - Identify the upper and lower xpoints by checking the
+        # Z coordinate of the xpoints
+
+        if self.xpt[0][1] > self.xpt[1][1]:
+
+            self.xpoint_upper_R = self.xpt[0][0]
+            self.xpoint_upper_Z = self.xpt[0][1]
+            self.xpoint_upper_psi = self.xpt[0][2]
+
+            self.xpoint_lower_R = self.xpt[1][0]
+            self.xpoint_lower_Z = self.xpt[1][1]
+            self.xpoint_lower_psi = self.xpt[1][2]
+
+        else:
+
+            self.xpoint_upper_R = self.xpt[1][0]
+            self.xpoint_upper_Z = self.xpt[1][1]
+            self.xpoint_upper_psi = self.xpt[1][2]
+
+            self.xpoint_lower_R = self.xpt[0][0]
+            self.xpoint_lower_Z = self.xpt[0][1]
+            self.xpoint_lower_psi = self.xpt[0][2]
+
+        # Step 3 - Identify the magnetic configuration of the plasma
+        if self.is_limited:
+
+            self.USND = False
+            self.LSND = False
+            self.DND = False
+
+            self.mag_con = 'limited'
+
+        else:
+
+            # Check if DND
+            if (abs(self.xpoint_primary_psi-self.xpoint_secondary_psi)/abs(self.xpoint_primary_psi)) < 1.0e-04:
+
+                self.USND = False
+                self.LSND = False
+                self.DND = True
+
+                self.mag_con = 'DND'
+
+            else:
+
+                # Check if USND or LSND
+                if self.xpoint_primary_psi == self.xpoint_upper_psi:
+
+                    self.USND = True
+                    self.LSND = False
+                    self.DND = False
+
+                    self.mag_con = 'USND'
+
+                else:
+
+                    self.USND = False
+                    self.LSND = True
+                    self.DND = False
+
+                    self.mag_con = 'LSND'
+        
 def refine(eq, nx=None, ny=None):
     """
     Double grid resolution, returning a new equilibrium
