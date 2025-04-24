@@ -76,7 +76,7 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     zmax = eq.Zmax
 
     fvac = eq.fvac()  # Vacuum f = R*Bt
-    R0 = 1.0  # Reference location
+    R0 = eq.Rgeometric() #1.0  # Reference location
 
     data = {
         "nx": nx,
