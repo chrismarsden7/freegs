@@ -395,7 +395,7 @@ class Solenoid:
         result = 0.0
         for Zs in np.linspace(self.Zsmin, self.Zsmax, self.Ns):
             result += Greens(self.Rs, Zs, R, Z)
-        return result
+        return result/self.Ns
 
     def controlBr(self, R, Z):
         """
@@ -404,7 +404,7 @@ class Solenoid:
         result = 0.0
         for Zs in np.linspace(self.Zsmin, self.Zsmax, self.Ns):
             result += GreensBr(self.Rs, Zs, R, Z)
-        return result
+        return result/self.Ns
 
     def controlBz(self, R, Z):
         """
@@ -413,7 +413,7 @@ class Solenoid:
         result = 0.0
         for Zs in np.linspace(self.Zsmin, self.Zsmax, self.Ns):
             result += GreensBz(self.Rs, Zs, R, Z)
-        return result
+        return result/self.Ns
 
     def getForces(self, equilibrium):
         """

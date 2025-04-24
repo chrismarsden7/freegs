@@ -92,7 +92,7 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     data["rmagx"], data["zmagx"], data["simagx"] = opoint[0]  # magnetic axis
 
     # Remove Psi magi axis to set it to zero at mag x
-    data["sibdry"] = eq.psi_bndry - data["simagx"]  # Psi at boundary
+    data["sibdry"] = eq.psi_bndry  # Psi at boundary
 
     data["cpasma"] = eq.plasmaCurrent()  # Plasma current [A]
 
@@ -106,8 +106,12 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     # Added the pprime and ffprime data into geqdsk.write
     data["fprim"] = eq.ffprime(psinorm)
     data["pprim"] = eq.pprime(psinorm)
-    data["psi"] = psi - data["simagx"]
-    data["simagx"] = 0.0
+    data["psi"] = psi
+
+    # 2pi factor
+    data["psi"] = 2.0*np.pi*data["psi"]
+    data["sibdry"] = 2.0*np.pi*data["sibdry"]
+    data["simagx"] = 2.0*data["simagx"]
 
     qpsi = zeros([nx])
     qpsi[1:] = eq.q(psinorm[1:])  # Exclude axis
