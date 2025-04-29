@@ -111,7 +111,7 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     # 2pi factor
     data["psi"] = 2.0*np.pi*data["psi"]
     data["sibdry"] = 2.0*np.pi*data["sibdry"]
-    data["simagx"] = 2.0*data["simagx"]
+    data["simagx"] = 2.0*np.pi.data["simagx"]
 
     qpsi = zeros([nx])
     qpsi[1:] = eq.q(psinorm[1:])  # Exclude axis
