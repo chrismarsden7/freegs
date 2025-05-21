@@ -1168,7 +1168,7 @@ class Equilibrium:
 
         return R_sep_in, R_sep_out
 
-    def intersectsWall(self):
+    def intersectsWall(self):#
         """Assess whether or not the core plasma touches the vessel
         walls. Returns True if it does intersect.
         """
