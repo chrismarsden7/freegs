@@ -108,10 +108,14 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     data["pprim"] = eq.pprime(psinorm)
     data["psi"] = psi
 
-    # 2pi factor
+    # COCOS 7 -> 17 conversion (incl. Wb/rad -> Wb)
     data["psi"] = 2.0*np.pi*data["psi"]
     data["sibdry"] = 2.0*np.pi*data["sibdry"]
-    data["simagx"] = 2.0*np.pi.data["simagx"]
+    data["simagx"] = 2.0*np.pi*data["simagx"]
+    data["ffprime"] = data["ffprime"]/(2.0*np.pi)
+    data["fprim"] = data["fprim"]/(2.0*np.pi)
+    data["pprime"] = data["pprime"]/(2.0*np.pi)
+    data["pprim"] = data["pprim"]/(2.0*np.pi)
 
     qpsi = zeros([nx])
     qpsi[1:] = eq.q(psinorm[1:])  # Exclude axis
@@ -123,6 +127,11 @@ def write(eq, fh, label=None, oxpoints=None, fileformat=geqdsk.write):
     if eq.tokamak.wall:
         data["rlim"] = eq.tokamak.wall.R
         data["zlim"] = eq.tokamak.wall.Z
+
+        # Ensure the wall is joined up
+        if not(data["rlim"][0] == data["rlim"][-1] and data["zlim"][0] == data["zlim"][-1]):
+            data["rlim"].append(data["rlim"][0])
+            data["zlim"].append(data["zlim"][0])
 
     # rbdry, zbdry contain the boundary of the plasma
 
